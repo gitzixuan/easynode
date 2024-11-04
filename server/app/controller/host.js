@@ -51,7 +51,7 @@ async function updateHost({ res, request }) {
       hosts,
       id,
       host: newHost, name: newName, index, oldHost, expired, expiredNotify, group, consoleUrl, remark,
-      port, clientPort, username, authType, password, privateKey, credential, command, tempKey
+      port, clientPort, username, authType, password, privateKey, credential, command, tempKey, jumpHosts = []
     }
   } = request
   let isBatch = Array.isArray(hosts)
@@ -73,7 +73,6 @@ async function updateHost({ res, request }) {
         target[authType] = await AESEncryptAsync(clearSSHKey)
         // console.log(`${ authType }__commonKey加密存储: `, target[authType])
       }
-      delete target._id
       delete target.monitorData
       delete target.tempKey
       Object.assign(oldRecord, target)
@@ -85,7 +84,7 @@ async function updateHost({ res, request }) {
 
   let updateRecord = {
     name: newName, host: newHost, index, expired, expiredNotify, group, consoleUrl, remark,
-    port, clientPort, username, authType, password, privateKey, credential, command
+    port, clientPort, username, authType, password, privateKey, credential, command, jumpHosts
   }
 
   let oldRecord = await hostListDB.findOneAsync({ _id: id })

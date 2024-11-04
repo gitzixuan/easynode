@@ -1,16 +1,15 @@
 const { Server } = require('socket.io')
 const { Client: SSHClient } = require('ssh2')
 const { verifyAuthSync } = require('../utils/verify-auth')
-const { AESDecryptAsync } = require('../utils/encrypt')
 const { sendNoticeAsync } = require('../utils/notify')
 const { isAllowedIp, ping } = require('../utils/tools')
-const { HostListDB, CredentialsDB } = require('../utils/db-class')
+const { HostListDB } = require('../utils/db-class')
+const { getConnectionOptions, connectByJumpHosts } = require(process.env.NODE_ENV === 'dev' ? './plus-clear' : './plus')
 const hostListDB = new HostListDB().getInstance()
-const credentialsDB = new CredentialsDB().getInstance()
 
-function createInteractiveShell(socket, sshClient) {
+function createInteractiveShell(socket, targetSSHClient) {
   return new Promise((resolve) => {
-    sshClient.shell({ term: 'xterm-color' }, (err, stream) => {
+    targetSSHClient.shell({ term: 'xterm-color' }, (err, stream) => {
       resolve(stream)
       if (err) return socket.emit('output', err.toString())
       // 终端输出
@@ -20,70 +19,38 @@ function createInteractiveShell(socket, sshClient) {
         })
         .on('close', () => {
           consola.info('交互终端已关闭')
-          sshClient.end()
+          targetSSHClient.end()
         })
       socket.emit('connect_shell_success') // 已连接终端，web端可以执行指令了
     })
   })
 }
 
-// function execShell(sshClient, command = '', callback) {
-//   if (!command) return
-//   let result = ''
-//   sshClient.exec(`source ~/.bashrc && ${ command }`, (err, stream) => {
-//     if (err) return callback(err.toString())
-//     stream
-//       .on('data', (data) => {
-//         result += data.toString()
-//       })
-//       .stderr
-//       .on('data', (data) => {
-//         result += data.toString()
-//       })
-//       .on('close', () => {
-//         consola.info('一次性指令执行完成:', command)
-//         callback(result)
-//       })
-//       .on('error', (error) => {
-//         console.log('Error:', error.toString())
-//       })
-//   })
-// }
-
-async function createTerminal(hostId, socket, sshClient) {
-  // eslint-disable-next-line no-async-promise-executor
+async function createTerminal(hostId, socket, targetSSHClient) {
   return new Promise(async (resolve) => {
-    const hostList = await hostListDB.findAsync({})
-    const targetHostInfo = hostList.find(item => item._id === hostId) || {}
-    let { authType, host, port, username, name } = targetHostInfo
-    if (!host) return socket.emit('create_fail', `查找hostId【${ hostId }】凭证信息失败`)
-    let authInfo = { host, port, username }
-    // 统一使用commonKey解密
+    const targetHostInfo = await hostListDB.findOneAsync({ _id: hostId })
+    if (!targetHostInfo) return socket.emit('create_fail', `查找hostId【${ hostId }】凭证信息失败`)
+    let { authType, host, port, username, name, jumpHosts } = targetHostInfo
     try {
-    // 解密放到try里面，防止报错【commonKey必须配对, 否则需要重新添加服务器密钥】
-      if (authType === 'credential') {
-        let credentialId = await AESDecryptAsync(targetHostInfo[authType])
-        const sshRecord = await credentialsDB.findOneAsync({ _id: credentialId })
-        authInfo.authType = sshRecord.authType
-        authInfo[authInfo.authType] = await AESDecryptAsync(sshRecord[authInfo.authType])
-      } else {
-        authInfo[authType] = await AESDecryptAsync(targetHostInfo[authType])
+      let { authInfo: targetConnectionOptions } = await getConnectionOptions(hostId)
+      let jumpHostResult = await connectByJumpHosts(jumpHosts, targetConnectionOptions.host, targetConnectionOptions.port, socket)
+      if (jumpHostResult) {
+        targetConnectionOptions.sock = jumpHostResult.sock
       }
-      consola.info('准备连接终端：', host)
-      // targetHostInfo[targetHostInfo.authType] = await AESDecryptAsync(targetHostInfo[targetHostInfo.authType])
+
+      socket.emit('terminal_print_info', `准备连接目标终端: ${ name } - ${ host }`)
+      socket.emit('terminal_print_info', `连接信息: ssh ${ username }@${ host } -p ${ port }  ->  ${ authType }`)
+
+      consola.info('准备连接目标终端：', host)
       consola.log('连接信息', { username, port, authType })
-      sshClient
+      targetSSHClient
         .on('ready', async() => {
           sendNoticeAsync('host_login', '终端登录', `别名: ${ name } \n IP：${ host } \n 端口：${ port } \n 状态: 登录成功`)
+          socket.emit('terminal_print_info', `终端连接成功: ${ name } - ${ host }`)
           consola.success('终端连接成功：', host)
           socket.emit('connect_terminal_success', `终端连接成功：${ host }`)
-          let stream = await createInteractiveShell(socket, sshClient)
+          let stream = await createInteractiveShell(socket, targetSSHClient)
           resolve(stream)
-        // execShell(sshClient, 'history', (data) => {
-        //   data = data.split('\n').filter(item => item)
-        //   console.log(data)
-        //   socket.emit('terminal_command_history', data)
-        // })
         })
         .on('close', () => {
           consola.info('终端连接断开close: ', host)
@@ -96,7 +63,7 @@ async function createTerminal(hostId, socket, sshClient) {
           socket.emit('connect_fail', err.message)
         })
         .connect({
-          ...authInfo
+          ...targetConnectionOptions
         // debug: (info) => console.log(info)
         })
 
@@ -123,7 +90,7 @@ module.exports = (httpServer) => {
       return
     }
     consola.success('terminal websocket 已连接')
-    let sshClient = null
+    let targetSSHClient = null
     socket.on('create', async ({ hostId, token }) => {
       const { code } = await verifyAuthSync(token, requestIP)
       if (code !== 1) {
@@ -131,16 +98,10 @@ module.exports = (httpServer) => {
         socket.disconnect()
         return
       }
-      sshClient = new SSHClient()
-
-      // 尝试手动断开调试，再次连接后终端输出内容为4份相同的输出，导致异常
-      // setTimeout(() => {
-      //   sshClient.end()
-      // }, 3000)
+      targetSSHClient = new SSHClient()
       let stream = null
-
       function listenerInput(key) {
-        if (sshClient._sock.writable === false) return consola.info('终端连接已关闭,禁止输入')
+        if (targetSSHClient._sock.writable === false) return consola.info('终端连接已关闭,禁止输入')
         stream && stream.write(key)
       }
       function resizeShell({ rows, cols }) {
@@ -155,20 +116,20 @@ module.exports = (httpServer) => {
         consola.info('重连终端: ', hostId)
         socket.off('input', listenerInput) // 取消监听,重新注册监听,操作新的stream
         socket.off('resize', resizeShell)
-        sshClient?.end()
-        sshClient?.destroy()
-        sshClient = null
+        targetSSHClient?.end()
+        targetSSHClient?.destroy()
+        targetSSHClient = null
         stream = null
         setTimeout(async () => {
           // 初始化新的SSH客户端对象
-          sshClient = new SSHClient()
-          stream = await createTerminal(hostId, socket, sshClient)
+          targetSSHClient = new SSHClient()
+          stream = await createTerminal(hostId, socket, targetSSHClient)
           socket.emit('reconnect_terminal_success')
           socket.on('input', listenerInput)
           socket.on('resize', resizeShell)
         }, 3000)
       })
-      stream = await createTerminal(hostId, socket, sshClient)
+      stream = await createTerminal(hostId, socket, targetSSHClient)
     })
 
     socket.on('get_ping',async (ip) => {

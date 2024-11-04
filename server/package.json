@@ -1,6 +1,6 @@
 {
   "name": "server",
-  "version": "1.0.0",
+  "version": "3.0.0",
   "description": "easynode-server",
   "bin": "./bin/www",
   "scripts": {
@@ -8,7 +8,8 @@
     "prod": "cross-env EXEC_ENV=production nodemon index.js",
     "start": "node ./index.js",
     "lint": "eslint . --ext .js,.vue",
-    "lint:fix": "eslint . --ext .js,.jsx,.cjs,.mjs --fix"
+    "lint:fix": "eslint . --ext .js,.jsx,.cjs,.mjs --fix",
+    "encrypt": "node ./app/encrypt-file.js"
   },
   "keywords": [],
   "author": "",
