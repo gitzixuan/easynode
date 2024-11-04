@@ -1,11 +1,17 @@
 const fs = require('fs-extra')
 const path = require('path')
 const CryptoJS = require('crypto-js')
-require('dotenv').config()
-console.log(process.env.PLUS_DECRYPT_KEY)
+require('dotenv').config({ path: '.env-encrypt-key' })
+const version = require('../server/package.json').version
+
+console.log('加密版本：', version, '加密密钥：', process.env.PLUS_DECRYPT_KEY)
 
 async function encryptPlusClearFiles(dir) {
   try {
+    if (dir.includes('node_modules')) {
+      return;
+    }
+
     const files = await fs.readdir(dir)
 
     for (const file of files) {
@@ -17,7 +23,6 @@ async function encryptPlusClearFiles(dir) {
       } else if (file === 'plus-clear.js') {
         const content = await fs.readFile(fullPath, 'utf-8')
 
-        //  global.PLUS_DECRYPT_KEY
         const encryptedContent = CryptoJS.AES.encrypt(content, process.env.PLUS_DECRYPT_KEY).toString()
 
         const newPath = path.join(path.dirname(fullPath), 'plus.js')
@@ -25,7 +30,7 @@ async function encryptPlusClearFiles(dir) {
         await fs.writeFile(newPath, encryptedContent)
 
         console.log(`已加密文件: ${fullPath}`)
-        console.log(`生成加密文件: ${newPath}`)
+        console.log(`生成加密文件: ${newPath} `)
       }
     }
   } catch (error) {
@@ -33,12 +38,12 @@ async function encryptPlusClearFiles(dir) {
   }
 }
 
-const appDir = path.join(__dirname)
-console.log(appDir)
-// encryptPlusClearFiles(appDir)
-//   .then(() => {
-//     console.log('加密完成!')
-//   })
-//   .catch(error => {
-//     console.error('程序执行出错:', error)
-//   })
+const appDir = path.join(__dirname, '../server')
+
+encryptPlusClearFiles(appDir)
+  .then(() => {
+    console.log(`${version} 版本加密完成!`)
+  })
+  .catch(error => {
+    console.error('程序执行出错:', error)
+  })

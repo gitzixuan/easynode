@@ -1,18 +1,40 @@
+const path = require('path')
 const { Server } = require('socket.io')
 const { Client: SSHClient } = require('ssh2')
 const { verifyAuthSync } = require('../utils/verify-auth')
 const { sendNoticeAsync } = require('../utils/notify')
 const { isAllowedIp, ping } = require('../utils/tools')
-const { HostListDB } = require('../utils/db-class')
-const { getConnectionOptions, connectByJumpHosts } = require(process.env.NODE_ENV === 'dev' ? './plus-clear' : './plus')
+const { AESDecryptAsync } = require('../utils/encrypt')
+const { HostListDB, CredentialsDB } = require('../utils/db-class')
+const decryptAndExecuteAsync = require('../utils/decrypt-file')
 const hostListDB = new HostListDB().getInstance()
+const credentialsDB = new CredentialsDB().getInstance()
+
+async function getConnectionOptions(hostId) {
+  const hostInfo = await hostListDB.findOneAsync({ _id: hostId })
+  if (!hostInfo) throw new Error(`Host with ID ${ hostId } not found`)
+  let { authType, host, port, username, name } = hostInfo
+  let authInfo = { host, port, username }
+  try {
+    if (authType === 'credential') {
+      let credentialId = await AESDecryptAsync(hostInfo[authType])
+      const sshRecord = await credentialsDB.findOneAsync({ _id: credentialId })
+      authInfo.authType = sshRecord.authType
+      authInfo[authInfo.authType] = await AESDecryptAsync(sshRecord[authInfo.authType])
+    } else {
+      authInfo[authType] = await AESDecryptAsync(hostInfo[authType])
+    }
+    return { authInfo, name }
+  } catch (err) {
+    throw new Error(`解密认证信息失败: ${ err.message }`)
+  }
+}
 
 function createInteractiveShell(socket, targetSSHClient) {
   return new Promise((resolve) => {
     targetSSHClient.shell({ term: 'xterm-color' }, (err, stream) => {
       resolve(stream)
       if (err) return socket.emit('output', err.toString())
-      // 终端输出
       stream
         .on('data', (data) => {
           socket.emit('output', data.toString())
@@ -30,10 +52,15 @@ async function createTerminal(hostId, socket, targetSSHClient) {
   return new Promise(async (resolve) => {
     const targetHostInfo = await hostListDB.findOneAsync({ _id: hostId })
     if (!targetHostInfo) return socket.emit('create_fail', `查找hostId【${ hostId }】凭证信息失败`)
+    let connectByJumpHosts = null
+    let data = await decryptAndExecuteAsync(path.join(__dirname, 'plus.js'))
+    if (data) {
+      connectByJumpHosts = data.connectByJumpHosts
+    }
     let { authType, host, port, username, name, jumpHosts } = targetHostInfo
     try {
       let { authInfo: targetConnectionOptions } = await getConnectionOptions(hostId)
-      let jumpHostResult = await connectByJumpHosts(jumpHosts, targetConnectionOptions.host, targetConnectionOptions.port, socket)
+      let jumpHostResult = connectByJumpHosts && await connectByJumpHosts(jumpHosts, targetConnectionOptions.host, targetConnectionOptions.port, socket)
       if (jumpHostResult) {
         targetConnectionOptions.sock = jumpHostResult.sock
       }
@@ -43,8 +70,9 @@ async function createTerminal(hostId, socket, targetSSHClient) {
 
       consola.info('准备连接目标终端：', host)
       consola.log('连接信息', { username, port, authType })
+      let closeNoticeFlag = false // 避免重复发送通知
       targetSSHClient
-        .on('ready', async() => {
+        .on('ready', async () => {
           sendNoticeAsync('host_login', '终端登录', `别名: ${ name } \n IP：${ host } \n 端口：${ port } \n 状态: 登录成功`)
           socket.emit('terminal_print_info', `终端连接成功: ${ name } - ${ host }`)
           consola.success('终端连接成功：', host)
@@ -52,24 +80,26 @@ async function createTerminal(hostId, socket, targetSSHClient) {
           let stream = await createInteractiveShell(socket, targetSSHClient)
           resolve(stream)
         })
-        .on('close', () => {
-          consola.info('终端连接断开close: ', host)
-          socket.emit('connect_close')
+        .on('close', (err) => {
+          if (closeNoticeFlag) return closeNoticeFlag = false
+          const closeReason = err ? '发生错误导致连接断开' : '正常断开连接'
+          consola.info(`终端连接断开(${ closeReason }): ${ host }`)
+          socket.emit('connect_close', { reason: closeReason })
         })
         .on('error', (err) => {
-          consola.log(err)
+          closeNoticeFlag = true
           sendNoticeAsync('host_login', '终端登录', `别名: ${ name } \n IP：${ host } \n 端口：${ port } \n 状态: 登录失败`)
           consola.error('连接终端失败:', host, err.message)
-          socket.emit('connect_fail', err.message)
+          socket.emit('connect_terminal_fail', err.message)
         })
         .connect({
           ...targetConnectionOptions
-        // debug: (info) => console.log(info)
+          // debug: (info) => console.log(info)
         })
 
     } catch (err) {
       consola.error('创建终端失败: ', host, err.message)
-      socket.emit('create_fail', err.message)
+      socket.emit('create_terminal_fail', err.message)
     }
   })
 }
@@ -78,11 +108,15 @@ module.exports = (httpServer) => {
   const serverIo = new Server(httpServer, {
     path: '/terminal',
     cors: {
-      origin: '*' // 'http://localhost:8080'
+      origin: '*'
     }
   })
+
+  let connectionCount = 0
+
   serverIo.on('connection', (socket) => {
-    // 前者兼容nginx反代, 后者兼容nodejs自身服务
+    connectionCount++
+    consola.success(`terminal websocket 已连接 - 当前连接数: ${ connectionCount }`)
     let requestIP = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address
     if (!isAllowedIp(requestIP)) {
       socket.emit('ip_forbidden', 'IP地址不在白名单中')
@@ -105,34 +139,14 @@ module.exports = (httpServer) => {
         stream && stream.write(key)
       }
       function resizeShell({ rows, cols }) {
-        // consola.info('更改tty终端行&列: ', { rows, cols })
         stream && stream.setWindow(rows, cols)
       }
       socket.on('input', listenerInput)
       socket.on('resize', resizeShell)
-
-      // 重连
-      socket.on('reconnect_terminal', async () => {
-        consola.info('重连终端: ', hostId)
-        socket.off('input', listenerInput) // 取消监听,重新注册监听,操作新的stream
-        socket.off('resize', resizeShell)
-        targetSSHClient?.end()
-        targetSSHClient?.destroy()
-        targetSSHClient = null
-        stream = null
-        setTimeout(async () => {
-          // 初始化新的SSH客户端对象
-          targetSSHClient = new SSHClient()
-          stream = await createTerminal(hostId, socket, targetSSHClient)
-          socket.emit('reconnect_terminal_success')
-          socket.on('input', listenerInput)
-          socket.on('resize', resizeShell)
-        }, 3000)
-      })
       stream = await createTerminal(hostId, socket, targetSSHClient)
     })
 
-    socket.on('get_ping',async (ip) => {
+    socket.on('get_ping', async (ip) => {
       try {
         socket.emit('ping_data', await ping(ip, 2500))
       } catch (error) {
@@ -141,7 +155,10 @@ module.exports = (httpServer) => {
     })
 
     socket.on('disconnect', (reason) => {
-      consola.info('终端socket连接断开:', reason)
+      connectionCount--
+      consola.info(`终端socket连接断开: ${ reason } - 当前连接数: ${ connectionCount }`)
     })
   })
 }
+
+module.exports.getConnectionOptions = getConnectionOptions

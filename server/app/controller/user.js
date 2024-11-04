@@ -166,7 +166,9 @@ const disableMFA2 = async ({ res }) => {
 }
 
 const getPlusInfo = async ({ res }) => {
-  const data = await plusDB.findOneAsync({})
+  let data = await plusDB.findOneAsync({})
+  delete data?._id
+  delete data?.decryptKey
   res.success({ data, msg: 'success' })
 }
 

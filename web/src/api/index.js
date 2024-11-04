@@ -19,9 +19,9 @@ export default {
   removeSSH(id) {
     return axios({ url: `/remove-ssh/${ id }`, method: 'delete' })
   },
-  // existSSH(host) {
-  //   return axios({ url: '/exist-ssh', method: 'post', data: { host } })
-  // },
+  getPlusInfo() {
+    return axios({ url: '/plus-info', method: 'get' })
+  },
   getCommand(hostId) {
     return axios({ url: '/command', method: 'get', params: { hostId } })
   },

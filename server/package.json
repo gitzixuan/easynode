@@ -8,8 +8,7 @@
     "prod": "cross-env EXEC_ENV=production nodemon index.js",
     "start": "node ./index.js",
     "lint": "eslint . --ext .js,.vue",
-    "lint:fix": "eslint . --ext .js,.jsx,.cjs,.mjs --fix",
-    "encrypt": "node ./app/encrypt-file.js"
+    "lint:fix": "eslint . --ext .js,.jsx,.cjs,.mjs --fix"
   },
   "keywords": [],
   "author": "",
