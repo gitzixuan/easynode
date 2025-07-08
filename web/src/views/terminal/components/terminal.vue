@@ -115,7 +115,7 @@
         <div class="switch_wrap">
           <el-tooltip
             effect="dark"
-            content="同步键盘输入到所有会话"
+            content="同步输入到所有终端"
             placement="bottom"
           >
             <el-switch
@@ -225,7 +225,7 @@
             <div :class="['tab_content_wrap_header_item', { 'active': getSyncCurTab(item.key) }]">
               <el-tooltip
                 effect="dark"
-                content="同步输入到所有分屏"
+                content="同步输入到分屏"
                 placement="bottom"
               >
                 <span @click="handleSyncCurTabInput">
@@ -236,7 +236,7 @@
             <div :class="['tab_content_wrap_header_item', { 'active': getSplitStatus(item.key).h }]">
               <el-tooltip
                 effect="dark"
-                content="左右二分屏"
+                content="左右分屏"
                 placement="bottom"
               >
                 <span @click="handleHorizontalScreen">
@@ -247,7 +247,7 @@
             <div :class="['tab_content_wrap_header_item', { 'active': getSplitStatus(item.key).v }]">
               <el-tooltip
                 effect="dark"
-                content="上下二分屏"
+                content="上下分屏"
                 placement="bottom"
               >
                 <span @click="handleVerticalScreen">
