@@ -134,7 +134,7 @@
         <div class="switch_wrap">
           <el-tooltip
             effect="dark"
-            content="包含SFTP文件传输、脚本库等功能"
+            content="包含脚本库、docker管理等功能"
             placement="bottom"
           >
             <el-switch
@@ -200,25 +200,29 @@
         </template>
         <div class="tab_content_wrap">
           <div class="tab_content_header">
-            <div class="tab_content_wrap_header_item active">
+            <div :class="['tab_content_wrap_header_item', { 'active': showInfoSide }]">
               <el-tooltip
                 effect="dark"
                 content="状态"
                 placement="bottom"
               >
-                <svg-icon name="icon-zhuangtai" class="icon" />
+                <span @click="() => (showInfoSide = !showInfoSide)">
+                  <svg-icon name="icon-zhuangtai" class="icon" />
+                </span>
               </el-tooltip>
             </div>
-            <div class="tab_content_wrap_header_item">
+            <div :class="['tab_content_wrap_header_item', { 'active': showSftp }]">
               <el-tooltip
                 effect="dark"
                 content="Sftp"
                 placement="bottom"
               >
-                <svg-icon name="icon-sftp" class="icon" />
+                <span @click="() => (showSftp = !showSftp)">
+                  <svg-icon name="icon-sftp" class="icon" />
+                </span>
               </el-tooltip>
             </div>
-            <div class="tab_content_wrap_header_item">
+            <!-- <div class="tab_content_wrap_header_item">
               <el-tooltip
                 effect="dark"
                 content="同步输入到所有分屏"
@@ -244,10 +248,10 @@
               >
                 <svg-icon name="icon-a-05kuandufenping" class="icon" />
               </el-tooltip>
-            </div>
+            </div> -->
           </div>
           <div class="tab_content_main">
-            <div class="tab_content_main_info">
+            <div :class="['tab_content_main_info_side', { 'show_info_side': showInfoSide }]">
               <InfoSide
                 ref="infoSideRef"
                 :host-info="curHost"
@@ -267,7 +271,7 @@
                 @reset-long-press="resetLongPress"
               />
             </div>
-            <div class="tab_content_main_sftp">
+            <div :class="['tab_content_main_sftp', { 'show_sftp': showSftp }]">
               <SftpV2
                 :host-id="item.id"
                 @resize="resizeTerminal"
@@ -353,12 +357,14 @@ const terminalRefs = ref([])
 // const sftpRefs = ref([])
 const activeTabIndex = ref(0)
 const visible = ref(true)
-const showFooterBar = ref(localStorage.getItem('showFooterBar') === 'true')
 const isSyncAllSession = ref(false)
 const mainHeight = ref('')
 const hostFormVisible = ref(false)
 const updateHostData = ref(null)
 const showSetting = ref(false)
+const showInfoSide = ref(true)
+const showSftp = ref(false)
+const showFooterBar = ref(false)
 const showMobileInfoSideDialog = ref(false)
 const longPressCtrl = ref(false)
 const longPressAlt = ref(false)
@@ -597,11 +603,9 @@ watch(
 )
 
 watch(
-  showFooterBar,
+  [showFooterBar, showInfoSide, showSftp,],
   () => {
     setTimeout(async () => {
-      localStorage.setItem('showFooterBar', showFooterBar.value)
-      await $nextTick()
       resizeTerminal()
     }, 210)
   },
@@ -793,25 +797,39 @@ const handleInputCommand = async (command) => {
         min-height: 300px;
         display: flex;
 
-        .tab_content_main_info {
-          width: 250px;
-          min-width: 250px;
+        .tab_content_main_info_side {
+          width: 0;
+          min-width: 0;
           height: 100%;
           overflow-y: auto;
           overflow-x: hidden;
+          transition: all 0.2s;
+          &.show_info_side {
+            width: 250px;
+            min-width: 250px;
+          }
         }
 
         .tab_content_main_terminals {
           height: 100%;
           flex: 1;
+          min-width: 300px;
         }
 
         .tab_content_main_sftp {
           height: 100%;
-          width: 450px;
-          min-width: 450px;
-          overflow-y: auto;
-          overflow-x: hidden;
+          width: 0;
+          min-width: 0;
+          overflow: hidden;
+          transition: all 0.2s;
+          flex-shrink: 0;
+          &.show_sftp {
+            width: 450px;
+            min-width: 450px;
+            max-width: 450px;
+            overflow-y: auto;
+            overflow-x: hidden;
+          }
         }
       }
 
@@ -819,6 +837,7 @@ const handleInputCommand = async (command) => {
         transition: all 0.2s;
         height: 0;
         min-height: 0;
+        overflow: hidden;
         &.show_footer_bar {
           height: 250px;
           min-height: 250px;
