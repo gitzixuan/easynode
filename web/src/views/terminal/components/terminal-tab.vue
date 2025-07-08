@@ -30,8 +30,11 @@ import { EventBus, isDockerId, isDockerComposeYml } from '@/utils'
 
 const { CONNECTING, CONNECT_SUCCESS, CONNECT_FAIL } = terminalStatus
 
+const instance = getCurrentInstance()
+const { uid } = instance
+const { proxy: { $api, $store, $serviceURI, $notification, $router, $message, $messageBox } } = instance
+
 const { io } = socketIo
-const { proxy: { $api, $store, $serviceURI, $notification, $router, $message, $messageBox } } = getCurrentInstance()
 
 const props = defineProps({
   hostObj: {
@@ -428,7 +431,7 @@ const onData = () => {
       }
     })
     if (curStatus.value !== CONNECT_SUCCESS) return
-    emit('inputCommand', key)
+    emit('inputCommand', key, uid)
     socket.value.emit('input', key)
   })
 }
@@ -644,7 +647,7 @@ const handlePaste = async () => {
   while (key.endsWith('\n')) {
     key = key.slice(0, -1)
   }
-  emit('inputCommand', key)
+  emit('inputCommand', key, uid)
   socket.value.emit('input', key)
   term.value.focus()
   term.value.clearSelection()

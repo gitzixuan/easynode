@@ -222,33 +222,39 @@
                 </span>
               </el-tooltip>
             </div>
-            <!-- <div class="tab_content_wrap_header_item">
+            <div :class="['tab_content_wrap_header_item', { 'active': getSyncCurTab(item.key) }]">
               <el-tooltip
                 effect="dark"
                 content="同步输入到所有分屏"
                 placement="bottom"
               >
-                <svg-icon name="icon-lianjie" class="icon" />
+                <span @click="handleSyncCurTabInput">
+                  <svg-icon name="icon-lianjie" class="icon" />
+                </span>
               </el-tooltip>
             </div>
-            <div class="tab_content_wrap_header_item">
+            <div :class="['tab_content_wrap_header_item', { 'active': getSplitStatus(item.key).h }]">
               <el-tooltip
                 effect="dark"
-                content="上下分屏"
+                content="左右二分屏"
                 placement="bottom"
               >
-                <svg-icon name="icon-a-06gaodufenping" class="icon" />
+                <span @click="handleHorizontalScreen">
+                  <svg-icon name="icon-a-06gaodufenping" class="icon" />
+                </span>
               </el-tooltip>
             </div>
-            <div class="tab_content_wrap_header_item">
+            <div :class="['tab_content_wrap_header_item', { 'active': getSplitStatus(item.key).v }]">
               <el-tooltip
                 effect="dark"
-                content="左右分屏"
+                content="上下二分屏"
                 placement="bottom"
               >
-                <svg-icon name="icon-a-05kuandufenping" class="icon" />
+                <span @click="handleVerticalScreen">
+                  <svg-icon name="icon-a-05kuandufenping" class="icon" />
+                </span>
               </el-tooltip>
-            </div> -->
+            </div>
           </div>
           <div class="tab_content_main">
             <div :class="['tab_content_main_info_side', { 'show_info_side': showInfoSide }]">
@@ -259,17 +265,24 @@
                 :ping-data="pingData"
               />
             </div>
-            <div class="tab_content_main_terminals">
-              <!-- @cd-command="cdCommand" -->
-              <TerminalTab
-                ref="terminalRefs"
-                :host-obj="item"
-                :long-press-ctrl="longPressCtrl"
-                :long-press-alt="longPressAlt"
-                @input-command="terminalInput"
-                @ping-data="getPingData"
-                @reset-long-press="resetLongPress"
-              />
+            <div
+              class="tab_content_main_terminals"
+              :class="getSplitContainerClass(item.key)"
+            >
+              <template v-for="panelIndex in getTerminalCount(item.key)" :key="`${item.key}-${panelIndex}`">
+                <div class="terminal_item">
+                  <!-- @cd-command="cdCommand" -->
+                  <TerminalTab
+                    ref="terminalRefs"
+                    :host-obj="item"
+                    :long-press-ctrl="longPressCtrl"
+                    :long-press-alt="longPressAlt"
+                    @input-command="(cmd, uid) => terminalInput(cmd, uid)"
+                    @ping-data="getPingData"
+                    @reset-long-press="resetLongPress"
+                  />
+                </div>
+              </template>
             </div>
             <div :class="['tab_content_main_sftp', { 'show_sftp': showSftp }]">
               <SftpV2
@@ -317,6 +330,7 @@
 <script setup>
 import {
   ref,
+  reactive,
   computed,
   getCurrentInstance,
   watch,
@@ -372,6 +386,70 @@ const scriptDropdownRef = ref(null)
 const scriptCascaderRef = ref(null)
 const hostGroupCascaderRef = ref(null)
 const hostDropdownRef = ref(null)
+
+// ======================= 同步当前tab分屏状态 =======================
+const syncCurTabMap = reactive({})
+
+const getSyncCurTab = (key) => syncCurTabMap[key] || false
+
+const handleSyncCurTabInput = () => {
+  const key = getTabKeyByIndex(activeTabIndex.value)
+  if (!key) return
+  syncCurTabMap[key] = !getSyncCurTab(key)
+}
+
+// ======================= 分屏状态 =======================
+// 每个 tab(key) 对应的分屏状态 { h: boolean, v: boolean }
+const splitStatusMap = reactive({})
+
+const getTabKeyByIndex = (idx) => terminalTabs.value[idx]?.key
+
+const getSplitStatus = (key) => splitStatusMap[key] || { h: false, v: false }
+
+// 计算某 tab 需要渲染的终端数量
+const getTerminalCountByIndex = (idx) => {
+  const key = getTabKeyByIndex(idx)
+  if (!key) return 0
+  const { h, v } = getSplitStatus(key)
+  return (h ? 2 : 1) * (v ? 2 : 1)
+}
+
+const getStartIndexByTabIndex = (idx) => {
+  let start = 0
+  for (let i = 0; i < idx; i++) {
+    start += getTerminalCountByIndex(i)
+  }
+  return start
+}
+
+const getTerminalRefsOfTab = (idx) => {
+  const start = getStartIndexByTabIndex(idx)
+  const count = getTerminalCountByIndex(idx)
+  return terminalRefs.value.slice(start, start + count)
+}
+
+const getFirstTerminalRefOfTab = (idx) => getTerminalRefsOfTab(idx)[0]
+
+const focusLastTerminalOfActive = () => {
+  const idx = activeTabIndex.value
+  const refs = getTerminalRefsOfTab(idx)
+  const last = refs[refs.length - 1]
+  last?.focusTab && last.focusTab()
+}
+
+// ======================= 提供给模板使用的辅助函数 =======================
+const getTerminalCount = (tabKey) => {
+  const { h, v } = getSplitStatus(tabKey)
+  return (h ? 2 : 1) * (v ? 2 : 1)
+}
+
+const getSplitContainerClass = (tabKey) => {
+  const { h, v } = getSplitStatus(tabKey)
+  if (h && v) return 'four_split'
+  if (h) return 'horizontal_split'
+  if (v) return 'vertical_split'
+  return 'single_split'
+}
 
 const isPlusActive = computed(() => $store.isPlusActive)
 const terminalTabs = computed(() => props.terminalTabs)
@@ -479,10 +557,8 @@ const handleClickVirtualKeyboard = async (virtualKey) => {
         longPressAlt.value = true
         longPressCtrl.value = false
       }
-      // eslint-disable-next-line no-case-declarations
-      const curTerminalRef = terminalRefs.value[activeTabIndex.value]
       await $nextTick()
-      curTerminalRef?.focusTab()
+      getFirstTerminalRefOfTab(activeTabIndex.value)?.focusTab()
       break
     case SINGLE_PRESS:
       longPressCtrl.value = false
@@ -552,12 +628,20 @@ const handleExecScript = async (scriptDescObj) => {
   }, 100)
 }
 
-const terminalInput = (command) => {
-  if (!isSyncAllSession.value) return
-  let filterTerminalRefs = terminalRefs.value.filter((host, index) => {
-    return index !== activeTabIndex.value
-  })
-  filterTerminalRefs.forEach((hostRef) => {
+const terminalInput = (command, uid) => {
+  const curTabKey = getTabKeyByIndex(activeTabIndex.value)
+  const isSyncCurTab = getSyncCurTab(curTabKey)
+
+  if (!isSyncAllSession.value && !isSyncCurTab) return
+
+  let targetRefs = []
+  if (isSyncAllSession.value) {
+    targetRefs = terminalRefs.value
+  } else if (isSyncCurTab) {
+    targetRefs = getTerminalRefsOfTab(activeTabIndex.value)
+  }
+  targetRefs = targetRefs.filter((r) => r?.$?.uid !== uid)
+  targetRefs.forEach((hostRef) => {
     hostRef.inputCommand(command, true)
   })
 }
@@ -581,8 +665,7 @@ const getPingData = (data) => {
 
 const tabChange = async (index) => {
   await $nextTick()
-  const curTerminalRef = terminalRefs.value[index]
-  curTerminalRef?.focusTab()
+  getFirstTerminalRefOfTab(index)?.focusTab()
 }
 
 watch(
@@ -617,6 +700,11 @@ watch(
 
 const removeTab = (index) => {
   emit('removeTab', index)
+  const key = getTabKeyByIndex(index)
+  if (key) {
+    if (splitStatusMap[key]) delete splitStatusMap[key]
+    if (syncCurTabMap[key]) delete syncCurTabMap[key]
+  }
   if (index === activeTabIndex.value) {
     nextTick(() => {
       activeTabIndex.value = 0
@@ -628,6 +716,30 @@ const handleFullScreen = () => {
   document
     .getElementsByClassName('terminal_and_sftp_wrap')[0]
     .requestFullscreen()
+}
+
+const handleHorizontalScreen = () => {
+  if (isMobileScreen.value) return
+  const key = getTabKeyByIndex(activeTabIndex.value)
+  if (!key) return
+  const status = splitStatusMap[key] || { h: false, v: false }
+  splitStatusMap[key] = { ...status, h: !status.h }
+  nextTick(() => {
+    resizeTerminal()
+    focusLastTerminalOfActive()
+  })
+}
+
+const handleVerticalScreen = () => {
+  if (isMobileScreen.value) return
+  const key = getTabKeyByIndex(activeTabIndex.value)
+  if (!key) return
+  const status = splitStatusMap[key] || { h: false, v: false }
+  splitStatusMap[key] = { ...status, v: !status.v }
+  nextTick(() => {
+    resizeTerminal()
+    focusLastTerminalOfActive()
+  })
 }
 
 // const registryDbClick = () => {
@@ -653,7 +765,7 @@ const resizeTerminal = () => {
 }
 
 const handleInputCommand = async (command) => {
-  const curTerminalRef = terminalRefs.value[activeTabIndex.value]
+  const curTerminalRef = getFirstTerminalRefOfTab(activeTabIndex.value)
   await $nextTick()
   curTerminalRef?.focusTab()
   curTerminalRef.inputCommand(`${ command }`)
@@ -814,6 +926,37 @@ const handleInputCommand = async (command) => {
           height: 100%;
           flex: 1;
           min-width: 300px;
+          display: flex;
+          &.single_split {
+            flex-direction: row;
+            .terminal_item {
+              flex: 1;
+            }
+          }
+          &.horizontal_split {
+            flex-direction: row;
+            .terminal_item {
+              flex: 1;
+            }
+          }
+          &.vertical_split {
+            flex-direction: column;
+            .terminal_item {
+              flex: 1;
+            }
+          }
+          &.four_split {
+            flex-wrap: wrap;
+            .terminal_item {
+              flex: 0 0 50%;
+              height: 50%;
+            }
+          }
+          .terminal_item {
+            min-width: 0;
+            min-height: 0;
+            height: 100%;
+          }
         }
 
         .tab_content_main_sftp {
