@@ -270,16 +270,22 @@
               :class="getSplitContainerClass(item.key)"
             >
               <template v-for="panelIndex in getTerminalCount(item.key)" :key="`${item.key}-${panelIndex}`">
-                <div class="terminal_item">
+                <div
+                  class="terminal_item"
+                  :class="getSplitItemClass(item.key, panelIndex)"
+                  @click="setActiveSplit(item.key, panelIndex)"
+                >
                   <!-- @cd-command="cdCommand" -->
                   <TerminalTab
                     ref="terminalRefs"
                     :host-obj="item"
                     :long-press-ctrl="longPressCtrl"
                     :long-press-alt="longPressAlt"
+                    :auto-focus="panelIndex === 1"
                     @input-command="(cmd, uid) => terminalInput(cmd, uid)"
                     @ping-data="getPingData"
                     @reset-long-press="resetLongPress"
+                    @tab-focus="handleTabFocus"
                   />
                 </div>
               </template>
@@ -387,6 +393,13 @@ const scriptCascaderRef = ref(null)
 const hostGroupCascaderRef = ref(null)
 const hostDropdownRef = ref(null)
 
+// 当前聚焦终端 uid
+const focusedUid = ref(null)
+
+const handleTabFocus = (uid) => {
+  focusedUid.value = uid
+}
+
 // ======================= 同步当前tab分屏状态 =======================
 const syncCurTabMap = reactive({})
 
@@ -396,6 +409,26 @@ const handleSyncCurTabInput = () => {
   const key = getTabKeyByIndex(activeTabIndex.value)
   if (!key) return
   syncCurTabMap[key] = !getSyncCurTab(key)
+}
+
+// ======================= 分屏面板激活状态 =======================
+const activeSplitMap = reactive({})
+
+const getActiveSplit = (key) => activeSplitMap[key] || 1
+
+const setActiveSplit = (key, idx) => {
+  activeSplitMap[key] = idx
+}
+
+const getSplitItemClass = (key, panelIndex) => {
+  const classes = []
+  const { h, v } = getSplitStatus(key)
+  if (h && v) { // four split
+    const activeIdx = getActiveSplit(key)
+    if (panelIndex === activeIdx) classes.push(`active_split_${ panelIndex }`)
+  }
+  // for two split no special class
+  return classes
 }
 
 // ======================= 分屏状态 =======================
@@ -704,6 +737,7 @@ const removeTab = (index) => {
   if (key) {
     if (splitStatusMap[key]) delete splitStatusMap[key]
     if (syncCurTabMap[key]) delete syncCurTabMap[key]
+    if (activeSplitMap[key]) delete activeSplitMap[key]
   }
   if (index === activeTabIndex.value) {
     nextTick(() => {
@@ -726,7 +760,9 @@ const handleHorizontalScreen = () => {
   splitStatusMap[key] = { ...status, h: !status.h }
   nextTick(() => {
     resizeTerminal()
-    focusLastTerminalOfActive()
+    // 重新聚焦原先终端
+    const ref = terminalRefs.value.find(r => r?.$?.uid === focusedUid.value)
+    ref?.focusTab ? ref.focusTab() : terminalRefs.value?.[0]?.focusTab()
   })
 }
 
@@ -738,7 +774,9 @@ const handleVerticalScreen = () => {
   splitStatusMap[key] = { ...status, v: !status.v }
   nextTick(() => {
     resizeTerminal()
-    focusLastTerminalOfActive()
+    // focusLastTerminalOfActive()
+    const ref = terminalRefs.value.find(r => r?.$?.uid === focusedUid.value)
+    ref?.focusTab ? ref.focusTab() : terminalRefs.value?.[0]?.focusTab()
   })
 }
 
@@ -891,7 +929,7 @@ const handleInputCommand = async (command) => {
         min-height: 30px;
         display: flex;
         align-items: center;
-        // border-bottom: 1px solid var(--el-border-color);
+        border-bottom: 1px solid var(--el-border-color);
         .tab_content_wrap_header_item {
           padding: 0 15px;
           &.active {
@@ -927,6 +965,9 @@ const handleInputCommand = async (command) => {
           flex: 1;
           min-width: 300px;
           display: flex;
+          .terminal_item {
+            box-sizing: border-box;
+          }
           &.single_split {
             flex-direction: row;
             .terminal_item {
@@ -937,12 +978,18 @@ const handleInputCommand = async (command) => {
             flex-direction: row;
             .terminal_item {
               flex: 1;
+              &:not(:first-child) {
+                border-left: 1px solid var(--el-color-success);
+              }
             }
           }
           &.vertical_split {
             flex-direction: column;
             .terminal_item {
               flex: 1;
+              &:not(:first-child) {
+                border-top: 1px solid var(--el-color-success);
+              }
             }
           }
           &.four_split {
@@ -950,12 +997,31 @@ const handleInputCommand = async (command) => {
             .terminal_item {
               flex: 0 0 50%;
               height: 50%;
+              box-sizing: border-box;
+              border: 1px solid var(--el-border-color);
+            }
+            .terminal_item.active_split_1 {
+              border-right: 1px solid var(--el-color-success);
+              border-bottom: 1px solid var(--el-color-success);
+            }
+            .terminal_item.active_split_2 {
+              border-left: 1px solid var(--el-color-success);
+              border-bottom: 1px solid var(--el-color-success);
+            }
+            .terminal_item.active_split_3 {
+              border-right: 1px solid var(--el-color-success);
+              border-top: 1px solid var(--el-color-success);
+            }
+            .terminal_item.active_split_4 {
+              border-left: 1px solid var(--el-color-success);
+              border-top: 1px solid var(--el-color-success);
             }
           }
           .terminal_item {
             min-width: 0;
             min-height: 0;
             height: 100%;
+            box-sizing: border-box;
           }
         }
 

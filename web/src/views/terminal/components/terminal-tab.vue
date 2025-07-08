@@ -5,6 +5,7 @@
       class="terminal_container"
       @contextmenu="handleRightClick"
       @mouseup="handleMouseUp"
+      @mousedown="emit('tab-focus', uid)"
     />
     <!-- <div class="terminal_command_history">
       <CommandHistory :list="commandHistoryList" />
@@ -48,10 +49,11 @@ const props = defineProps({
   longPressAlt: {
     type: Boolean,
     default: false
-  }
+  },
+  autoFocus: { type: Boolean, default: true }
 })
 
-const emit = defineEmits(['inputCommand', 'cdCommand', 'ping-data', 'reset-long-press',])
+const emit = defineEmits(['inputCommand', 'cdCommand', 'ping-data', 'reset-long-press', 'tab-focus',])
 
 const socket = ref(null)
 // const commandHistoryList = ref([])
@@ -290,7 +292,7 @@ const createLocalTerminal = () => {
   terminalInstance.open(terminalRef.value)
   terminalInstance.writeln('\x1b[1;32mWelcome to EasyNode terminal\x1b[0m.')
   terminalInstance.writeln('\x1b[1;32mAn experimental Web-SSH Terminal\x1b[0m.')
-  terminalInstance.focus()
+  if (props.autoFocus) terminalInstance.focus()
   onFindText()
   onWebLinks()
   onResize()
