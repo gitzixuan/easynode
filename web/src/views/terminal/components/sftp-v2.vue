@@ -83,7 +83,7 @@
       size="small"
       :default-sort="{ prop: 'name' }"
       class="file_table"
-      element-loading-text="加载中..."
+      element-loading-text="loading..."
       @row-click="onRowClick"
       @row-contextmenu="onRowContextMenu"
       @selection-change="onSelectionChange"
@@ -236,6 +236,7 @@ onMounted(() => {
 
 const connectSftp = () => {
   const { io } = socketIo
+  loading.value = true
   socket.value = io($serviceURI, {
     path: '/sftp-v2',
     forceNew: false,
@@ -248,10 +249,12 @@ const connectSftp = () => {
     socket.value.on('connect_success', ({ rootList }) => {
       fileListRaw.value = rootList
       currentPath.value = '/'
+      loading.value = false
     })
 
     socket.value.on('connect_fail', (msg) => {
       $notification({ title: 'Sftp 连接失败', message: msg, type: 'error' })
+      loading.value = false
     })
 
     socket.value.on('dir_ls', (dirLs, path) => {
@@ -450,6 +453,14 @@ const onRowContextMenu = (row, _column, event) => {
     tableRef.value.toggleRowSelection(row, true)
   }
   const items = [
+    {
+      label: '收藏',
+      onClick: () => $message.info('收藏 (占位)')
+    },
+    {
+      label: '下载',
+      onClick: () => $message.info('下载 (占位)')
+    },
     {
       label: '复制',
       onClick: () => $message.info('复制 (占位)')
