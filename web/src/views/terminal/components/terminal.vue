@@ -293,7 +293,6 @@
             <div :class="['tab_content_main_sftp', { 'show_sftp': showSftp }]">
               <SftpV2
                 :host-id="item.id"
-                @resize="resizeTerminal"
                 @exec-command="handleInputCommand"
               />
             </div>
@@ -383,7 +382,7 @@ const hostFormVisible = ref(false)
 const updateHostData = ref(null)
 const showSetting = ref(false)
 const showInfoSide = ref(true)
-const showSftp = ref(false)
+const showSftp = ref(true)
 const showFooterBar = ref(false)
 const showMobileInfoSideDialog = ref(false)
 const longPressCtrl = ref(false)
