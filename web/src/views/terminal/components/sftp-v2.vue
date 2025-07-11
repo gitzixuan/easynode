@@ -72,6 +72,14 @@
         <View v-if="showHidden" />
         <Hide v-else />
       </el-icon>
+      <el-icon
+        v-if="hasDownloadTasks"
+        class="action_icon download_icon"
+        :title="`正在下载 ${activeDownloadTasks.length} 个任务`"
+        @click="showDownloadManager"
+      >
+        <Download />
+      </el-icon>
     </div>
 
     <!-- 文件列表 -->
@@ -147,12 +155,109 @@
         </div>
       </template>
     </el-popover>
+
+    <!-- 下载任务管理对话框 -->
+    <el-dialog
+      v-model="showDownloadDialog"
+      title="下载管理"
+      width="600px"
+      :close-on-click-modal="true"
+    >
+      <el-alert type="success" :closable="false" style="margin-bottom: 16px;">
+        <template #title>
+          <p style="font-size: 12px;"> 下列文件只在本次会话保留,连接断开后自动清理 </p>
+        </template>
+      </el-alert>
+      <div class="download_manager_container">
+        <!-- 正在下载的任务 -->
+        <div v-if="activeDownloadTasks.length > 0" class="download_section">
+          <h4 class="section_title">正在下载 ({{ activeDownloadTasks.length }})</h4>
+          <div class="download_task_list">
+            <div
+              v-for="task in activeDownloadTasks"
+              :key="task.taskId"
+              class="download_task_item"
+            >
+              <div class="task_header">
+                <div class="file_info">
+                  <el-icon class="file_icon"><Download /></el-icon>
+                  <span class="file_name">{{ task.fileName }}</span>
+                </div>
+                <el-button
+                  size="small"
+                  type="danger"
+                  @click="cancelDownload(task.taskId)"
+                >
+                  取消
+                </el-button>
+              </div>
+
+              <div class="progress_info">
+                <el-progress
+                  :percentage="task.progress"
+                  :show-text="false"
+                  :stroke-width="6"
+                  status="success"
+                />
+                <div class="progress_details">
+                  <span class="progress_text">
+                    {{ formatSize(task.downloadedSize) }} / {{ formatSize(task.totalSize) }}
+                    ({{ task.progress.toFixed(1) }}%)
+                  </span>
+                  <span class="speed_text">
+                    {{ formatSpeed(task.speed) }} · {{ formatTime(task.eta) }}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 已完成的任务 -->
+        <div v-if="completedDownloadTasks.length > 0" class="download_section">
+          <h4 class="section_title">已完成 ({{ completedDownloadTasks.length }})</h4>
+          <div class="download_task_list">
+            <div
+              v-for="task in completedDownloadTasks"
+              :key="task.taskId"
+              class="download_task_item completed"
+            >
+              <div class="task_header">
+                <div class="file_info">
+                  <el-icon class="file_icon success"><Check /></el-icon>
+                  <span class="file_name">{{ task.fileName }}</span>
+                </div>
+                <div class="task_actions">
+                  <el-button
+                    size="small"
+                    type="primary"
+                    @click="downloadFile(task)"
+                  >
+                    下载
+                  </el-button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 无任务时的提示 -->
+        <div v-if="!hasDownloadTasks" class="no_tasks">
+          <el-icon class="empty_icon"><Download /></el-icon>
+          <p>暂无下载任务</p>
+        </div>
+      </div>
+
+      <template #footer>
+        <el-button @click="showDownloadDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted, watch, getCurrentInstance, nextTick } from 'vue'
-import { ArrowDown, ArrowLeft, Refresh, View, Hide, Edit, ArrowRight, HomeFilled, Check, Close as CloseIcon } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, Refresh, View, Hide, Edit, ArrowRight, HomeFilled, Check, Close as CloseIcon, Download } from '@element-plus/icons-vue'
 import socketIo from 'socket.io-client'
 import dirIcon from '@/assets/image/system/dir.png'
 import linkIcon from '@/assets/image/system/link.png'
@@ -219,6 +324,23 @@ const newBtnRef = ref(null)
 
 // 上下文菜单
 const { showMenu } = useContextMenu()
+
+// 下载相关状态
+const showDownloadDialog = ref(false)
+const downloadTasks = ref(new Map()) // taskId -> 下载任务信息
+
+// 计算属性：是否有下载任务
+const hasDownloadTasks = computed(() => downloadTasks.value.size > 0)
+
+// 计算属性：正在进行的下载任务列表
+const activeDownloadTasks = computed(() => {
+  return Array.from(downloadTasks.value.values()).filter(task => task.status === 'downloading')
+})
+
+// 计算属性：已完成的下载任务列表
+const completedDownloadTasks = computed(() => {
+  return Array.from(downloadTasks.value.values()).filter(task => task.status === 'completed')
+})
 
 //----------------------------------
 // 初始化
@@ -309,6 +431,62 @@ const connectSftp = () => {
     socket.value.on('copy_fail', (msg) => {
       $message.error(`复制失败: ${ msg }`)
       loading.value = false
+    })
+
+    // 下载相关事件
+    socket.value.on('download_started', ({ taskId, fileName }) => {
+      const newTask = {
+        taskId,
+        fileName,
+        progress: 0,
+        downloadedSize: 0,
+        totalSize: 0,
+        speed: 0,
+        eta: 0,
+        status: 'downloading',
+        startTime: Date.now()
+      }
+      downloadTasks.value.set(taskId, newTask)
+      loading.value = false
+      showDownloadDialog.value = true
+    })
+
+    socket.value.on('download_progress', ({ taskId, progress, downloadedSize, totalSize, speed, eta }) => {
+      const task = downloadTasks.value.get(taskId)
+      if (task) {
+        task.progress = progress
+        task.downloadedSize = downloadedSize
+        task.totalSize = totalSize
+        task.speed = speed
+        task.eta = eta
+      }
+    })
+
+    socket.value.on('download_ready', ({ taskId, fileName }) => {
+      const task = downloadTasks.value.get(taskId)
+      if (task) {
+        task.status = 'completed'
+        task.progress = 100
+        task.downloadUrl = `/sftp-cache/${ taskId }/${ encodeURIComponent(fileName) }`
+        downloadFile(task)
+      }
+    })
+
+    socket.value.on('download_fail', (msg) => {
+      $message.error(`下载失败: ${ msg }`)
+      loading.value = false
+      // 清理失败的任务
+      for (const [taskId, task,] of downloadTasks.value) {
+        if (task.status === 'downloading') {
+          downloadTasks.value.delete(taskId)
+          break
+        }
+      }
+    })
+
+    socket.value.on('download_cancelled', ({ taskId }) => {
+      downloadTasks.value.delete(taskId)
+      $message.info('下载已取消')
     })
   })
 
@@ -482,15 +660,26 @@ const onRowContextMenu = (row, _column, event) => {
     tableRef.value.clearSelection()
     tableRef.value.toggleRowSelection(row, true)
   }
+
+  // 检查是否为多选状态
+  const isMultiSelected = selectedRows.value.length > 1
+
   const items = [
     {
       label: '收藏',
       onClick: () => $message.info('收藏 (占位)')
     },
-    {
+  ]
+
+  // 只有在非多选状态下才显示下载菜单
+  if (!isMultiSelected) {
+    items.push({
       label: '下载',
-      onClick: () => $message.info('下载 (占位)')
-    },
+      onClick: () => handleDownload(row)
+    })
+  }
+
+  items.push(
     {
       label: '复制到...',
       onClick: () => handleCopy(row)
@@ -502,25 +691,33 @@ const onRowContextMenu = (row, _column, event) => {
     {
       label: '删除',
       onClick: () => handleDelete(row)
-    },
-    {
+    }
+  )
+
+  // 重命名只在单选时显示
+  if (!isMultiSelected) {
+    items.push({
       label: '重命名',
       onClick: () => startRename(row)
-    },
-    {
-      label: '复制路径',
-      onClick: () => {
-        navigator.clipboard.writeText(currentPath.value + '/' + row.name)
-        $message.success('已复制路径')
-      }
-    },
-  ]
-  if (row.type === '-' && isArchiveFile(row.name)) {
+    })
+  }
+
+  items.push({
+    label: '复制路径',
+    onClick: () => {
+      navigator.clipboard.writeText(currentPath.value + '/' + row.name)
+      $message.success('已复制路径')
+    }
+  })
+
+  // 解压功能只在单选且为压缩文件时显示
+  if (!isMultiSelected && row.type === '-' && isArchiveFile(row.name)) {
     items.push({
       label: '解压',
       onClick: () => $message.info('解压 (占位)')
     })
   }
+
   showMenu(event, items)
 }
 
@@ -603,6 +800,61 @@ const handleCopy = (row) => {
     socket.value.emit('copy_server_batch', { dirPath: currentPath.value, destDir, targets: targets.map(t=>({ name:t.name })) })
   })
 }
+
+// 下载功能
+const handleDownload = (row) => {
+  // 只支持单文件/文件夹下载
+  const target = selectedRows.value.includes(row) ? row : row
+  loading.value = true
+  socket.value.emit('download_request', {
+    dirPath: currentPath.value,
+    target: { name: target.name, type: target.type }
+  })
+}
+
+// 取消下载
+const cancelDownload = (taskId) => {
+  if (taskId) {
+    socket.value.emit('download_cancel', { taskId })
+  }
+}
+
+// 显示下载任务管理器
+const showDownloadManager = () => {
+  showDownloadDialog.value = true
+}
+
+// 手动下载文件
+const downloadFile = (task) => {
+  if (task.downloadUrl) {
+    window.open(task.downloadUrl, '_blank')
+    $message.success(`开始下载: ${ task.fileName }`)
+  }
+}
+
+// 格式化文件大小
+const formatSize = (bytes) => {
+  if (!bytes || bytes === 0) return '0 B'
+  const KB = 1024, MB = KB * 1024, GB = MB * 1024, TB = GB * 1024
+  if (bytes < KB) return bytes + ' B'
+  if (bytes < MB) return (bytes / KB).toFixed(1) + ' KB'
+  if (bytes < GB) return (bytes / MB).toFixed(1) + ' MB'
+  if (bytes < TB) return (bytes / GB).toFixed(1) + ' GB'
+  return (bytes / TB).toFixed(1) + ' TB'
+}
+
+// 格式化速度
+const formatSpeed = (bytesPerSec) => {
+  return formatSize(bytesPerSec) + '/s'
+}
+
+// 格式化时间
+const formatTime = (seconds) => {
+  if (!seconds || seconds <= 0) return '计算中...'
+  if (seconds < 60) return Math.round(seconds) + ' 秒'
+  if (seconds < 3600) return Math.round(seconds / 60) + ' 分钟'
+  return Math.round(seconds / 3600) + ' 小时'
+}
 </script>
 
 <style lang="scss" scoped>
@@ -666,6 +918,16 @@ const handleCopy = (row) => {
       &:hover {
         color: var(--el-color-primary);
       }
+
+      &.download_icon {
+        color: var(--el-color-success);
+        animation: pulse 1.5s ease-in-out infinite;
+      }
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
     }
   }
 
@@ -711,5 +973,114 @@ const handleCopy = (row) => {
 /* 全局样式，为 Popover 指定的 popper-class 生效 */
 .sftp_create_popover .sftp_popover_actions {
   margin-top: 12px;
+}
+
+/* 下载管理器样式 */
+.download_manager_container {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.download_section {
+  margin-bottom: 24px;
+}
+
+.download_section:last-child {
+  margin-bottom: 0;
+}
+
+.section_title {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--el-text-color-primary);
+}
+
+.download_task_list {
+  space-y: 8px;
+}
+
+.download_task_item {
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 8px;
+  background-color: var(--el-bg-color-page);
+}
+
+.download_task_item.completed {
+  border-color: var(--el-color-success-light-7);
+  background-color: var(--el-color-success-light-9);
+}
+
+.task_header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.file_info {
+  display: flex;
+  align-items: center;
+  flex: 1;
+}
+
+.file_icon {
+  margin-right: 8px;
+  color: var(--el-color-primary);
+  font-size: 16px;
+}
+
+.file_icon.success {
+  color: var(--el-color-success);
+}
+
+.file_name {
+  font-weight: 500;
+  color: var(--el-text-color-primary);
+}
+
+.completed_text {
+  color: var(--el-color-success);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.task_actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.progress_info {
+  margin-top: 8px;
+}
+
+.progress_details {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.progress_text {
+  color: var(--el-text-color-regular);
+}
+
+.speed_text {
+  color: var(--el-text-color-secondary);
+}
+
+.no_tasks {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--el-text-color-secondary);
+}
+
+.empty_icon {
+  font-size: 48px;
+  color: var(--el-color-info-light-5);
+  margin-bottom: 12px;
 }
 </style>

@@ -13,6 +13,9 @@ const hostListDB = new HostListDB().getInstance()
 const { Client: SSHClient } = require('ssh2')
 
 const listenAction = (sftpClient, socket, isRootUser) => {
+  // 下载任务管理
+  const downloadTasks = new Map() // taskId -> { abortController, startTime, totalSize, downloadedSize }
+
   socket.on('open_dir', async (path) => {
     try {
       const dirLs = await sftpClient.list(path)
@@ -148,6 +151,218 @@ const listenAction = (sftpClient, socket, isRootUser) => {
       socket.emit('copy_fail', err.message)
     }
   })
+
+  // 下载功能
+  socket.on('download_request', async ({ dirPath, target }) => {
+    try {
+      if (!target) {
+        throw new Error('未选择要下载的文件(夹)')
+      }
+
+      const taskId = Date.now() + '-' + Math.random().toString(36).slice(2)
+      const taskDir = rawPath.join(sftpCacheDir, taskId)
+      await fs.ensureDir(taskDir)
+
+      const abortController = new AbortController()
+      downloadTasks.set(taskId, {
+        abortController,
+        startTime: Date.now(),
+        totalSize: 0,
+        downloadedSize: 0
+      })
+
+      socket.emit('download_started', { taskId, fileName: target.name })
+
+      const srcPath = rawPath.posix.join(dirPath, target.name)
+
+      if (target.type === 'd') {
+        // 文件夹：先在远端打包
+        const tarFileName = `${ target.name }.tar.gz`
+        const remoteTarPath = `/tmp/${ taskId }.tar.gz`
+        const localTarPath = rawPath.join(taskDir, tarFileName)
+
+        // 检查是否被取消
+        if (abortController.signal.aborted) {
+          throw new Error('下载已取消')
+        }
+
+        // 在远端打包
+        consola.info(`开始打包文件夹: ${ srcPath }`)
+        const tarCmd = `cd "${ dirPath }" && tar -czf "${ remoteTarPath }" "${ target.name }"`
+        await execCommand(tarCmd)
+        consola.info(`打包文件夹: ${ srcPath } 成功`)
+        // 获取打包文件大小
+        const statResult = await sftpClient.stat(remoteTarPath)
+        const totalSize = statResult.size
+
+        downloadTasks.get(taskId).totalSize = totalSize
+
+        // 下载打包文件
+        await downloadFileWithProgress(sftpClient, remoteTarPath, localTarPath, taskId, downloadTasks, socket, abortController)
+
+        // 清理远端临时文件
+        try {
+          await execCommand(`rm -f "${ remoteTarPath }"`)
+        } catch (cleanupErr) {
+          consola.warn('清理远端临时文件失败:', cleanupErr.message)
+        }
+
+        socket.emit('download_ready', { taskId, fileName: tarFileName })
+      } else {
+        // 单文件：直接下载
+        const localFilePath = rawPath.join(taskDir, target.name)
+
+        // 获取文件大小
+        const statResult = await sftpClient.stat(srcPath)
+        const totalSize = statResult.size
+
+        downloadTasks.get(taskId).totalSize = totalSize
+
+        await downloadFileWithProgress(sftpClient, srcPath, localFilePath, taskId, downloadTasks, socket, abortController)
+
+        socket.emit('download_ready', { taskId, fileName: target.name })
+      }
+
+      downloadTasks.delete(taskId)
+    } catch (err) {
+      consola.error('下载失败:', err.message)
+      socket.emit('download_fail', err.message)
+
+      // 清理任务
+      if (err.taskId) {
+        downloadTasks.delete(err.taskId)
+      }
+    }
+  })
+
+  // 取消下载
+  socket.on('download_cancel', ({ taskId }) => {
+    const task = downloadTasks.get(taskId)
+    if (task) {
+      task.abortController.abort()
+      downloadTasks.delete(taskId)
+      socket.emit('download_cancelled', { taskId })
+
+      // 如果没有其他下载任务，清理缓存目录
+      if (downloadTasks.size === 0) {
+        cleanupCacheDir()
+      }
+    }
+  })
+
+  // 清理缓存目录
+  const cleanupCacheDir = () => {
+    try {
+      fs.emptyDirSync(sftpCacheDir)
+      consola.success('已清理 sftpCacheDir:', sftpCacheDir)
+    } catch (err) {
+      consola.warn('清理缓存目录失败:', err.message)
+    }
+  }
+
+  // 监听连接断开，清理下载任务和缓存
+  socket.on('disconnect', () => {
+    // 取消所有下载任务
+    for (const [taskId, task] of downloadTasks) {
+      task.abortController.abort()
+    }
+    downloadTasks.clear()
+
+    // 清理缓存目录
+    cleanupCacheDir()
+  })
+
+  // 带进度的文件下载函数
+  async function downloadFileWithProgress(sftpClient, remotePath, localPath, taskId, downloadTasks, socket, abortController) {
+    return new Promise((resolve, reject) => {
+      const task = downloadTasks.get(taskId)
+      if (!task) {
+        return reject(new Error('任务不存在'))
+      }
+
+      let lastUpdateTime = Date.now()
+      let lastDownloadedSize = 0
+
+      const progressInterval = setInterval(() => {
+        if (abortController.signal.aborted) {
+          clearInterval(progressInterval)
+          return
+        }
+
+        const now = Date.now()
+        const currentTask = downloadTasks.get(taskId)
+        if (!currentTask) {
+          clearInterval(progressInterval)
+          return
+        }
+
+        const { totalSize, downloadedSize, startTime } = currentTask
+        const elapsed = (now - startTime) / 1000 // 秒
+        const progress = totalSize > 0 ? (downloadedSize / totalSize * 100) : 0
+
+        // 计算速度 (bytes/s)
+        const timeDiff = (now - lastUpdateTime) / 1000
+        const sizeDiff = downloadedSize - lastDownloadedSize
+        const speed = timeDiff > 0 ? sizeDiff / timeDiff : 0
+
+        // 计算剩余时间
+        const remainingBytes = totalSize - downloadedSize
+        const eta = speed > 0 ? remainingBytes / speed : 0
+
+        socket.emit('download_progress', {
+          taskId,
+          progress: Math.min(progress, 100),
+          downloadedSize,
+          totalSize,
+          speed: Math.round(speed),
+          eta: Math.round(eta)
+        })
+
+        lastUpdateTime = now
+        lastDownloadedSize = downloadedSize
+      }, 1000) // 每1秒更新
+
+      const readStream = sftpClient.createReadStream(remotePath)
+      const writeStream = fs.createWriteStream(localPath)
+
+      readStream.on('data', (chunk) => {
+        if (abortController.signal.aborted) {
+          readStream.destroy()
+          writeStream.destroy()
+          fs.unlink(localPath).catch(() => {}) // 删除部分下载的文件
+          clearInterval(progressInterval)
+          reject(new Error('下载已取消'))
+          return
+        }
+
+        const currentTask = downloadTasks.get(taskId)
+        if (currentTask) {
+          currentTask.downloadedSize += chunk.length
+        }
+      })
+
+      readStream.on('error', (err) => {
+        clearInterval(progressInterval)
+        writeStream.destroy()
+        fs.unlink(localPath).catch(() => {})
+        reject(err)
+      })
+
+      writeStream.on('error', (err) => {
+        clearInterval(progressInterval)
+        readStream.destroy()
+        fs.unlink(localPath).catch(() => {})
+        reject(err)
+      })
+
+      writeStream.on('finish', () => {
+        clearInterval(progressInterval)
+        resolve()
+      })
+
+      readStream.pipe(writeStream)
+    })
+  }
 }
 
 module.exports = (httpServer) => {
@@ -235,8 +450,7 @@ module.exports = (httpServer) => {
         consola.info('sftp断开连接失败:', error.message)
       } finally {
         sftpClient = null
-        fs.emptyDir(sftpCacheDir)
-        consola.success('clean sftpCacheDir: ', sftpCacheDir)
+        // 这里不再清理缓存目录，因为在 listenAction 中的 disconnect 处理器会处理
         jumpSshClients?.forEach(sshClient => sshClient && sshClient.end())
         jumpSshClients = null
       }
