@@ -168,7 +168,7 @@ const props = defineProps({
 })
 
 // 组件实例上下文
-const { proxy: { $store, $message, $notification, $serviceURI } } = getCurrentInstance()
+const { proxy: { $store, $message, $notification, $serviceURI, $messageBox } } = getCurrentInstance()
 
 // 路径 & 隐藏文件显示
 const currentPath = ref('/')
@@ -279,6 +279,36 @@ const connectSftp = () => {
       $message.error(`重命名失败: ${ msg }`)
       loading.value = false
       cancelRename()
+    })
+
+    socket.value.on('delete_success', () => {
+      $message.success('删除成功')
+      loading.value = false
+    })
+
+    socket.value.on('delete_fail', (msg) => {
+      $message.error(`删除失败: ${ msg }`)
+      loading.value = false
+    })
+
+    socket.value.on('move_success', () => {
+      $message.success('移动成功')
+      loading.value = false
+    })
+
+    socket.value.on('move_fail', (msg) => {
+      $message.error(`移动失败: ${ msg }`)
+      loading.value = false
+    })
+
+    socket.value.on('copy_success', () => {
+      $message.success('复制成功')
+      loading.value = false
+    })
+
+    socket.value.on('copy_fail', (msg) => {
+      $message.error(`复制失败: ${ msg }`)
+      loading.value = false
     })
   })
 
@@ -462,16 +492,16 @@ const onRowContextMenu = (row, _column, event) => {
       onClick: () => $message.info('下载 (占位)')
     },
     {
-      label: '复制',
-      onClick: () => $message.info('复制 (占位)')
+      label: '复制到...',
+      onClick: () => handleCopy(row)
     },
     {
-      label: '移动',
-      onClick: () => $message.info('移动 (占位)')
+      label: '移动到...',
+      onClick: () => handleMove(row)
     },
     {
       label: '删除',
-      onClick: () => $message.info('删除 (占位)')
+      onClick: () => handleDelete(row)
     },
     {
       label: '重命名',
@@ -519,6 +549,59 @@ function timeFormatter(row, column, cellValue) {
   const m = pad(date.getMinutes())
   const s = pad(date.getSeconds())
   return `${ Y }-${ M }-${ D } ${ h }:${ m }:${ s }`
+}
+
+const handleDelete = (row) => {
+  const targets = selectedRows.value.length > 1 && selectedRows.value.includes(row) ? selectedRows.value : [row,]
+  const namesStr = targets.map(t => t.name).join(', ')
+
+  $messageBox.confirm(`确认删除以下文件(夹)：\n${ namesStr }`, 'Warning', {
+    confirmButtonText: '确定',
+    cancelButtonText: '取消',
+    type: 'warning'
+  }).then(() => {
+    loading.value = true
+    socket.value.emit('delete_batch', { dirPath: currentPath.value, targets: targets.map(t=>({ name:t.name, type:t.type })) })
+  })
+}
+
+const handleMove = (row) => {
+  const targets = selectedRows.value.length > 1 && selectedRows.value.includes(row) ? selectedRows.value : [row,]
+  $messageBox.prompt('', '移动到...', {
+    confirmButtonText: '确定',
+    cancelButtonText: '取消',
+    inputType: 'text',
+    inputValue: currentPath.value + '/',
+    inputPlaceholder: '目标路径',
+    inputValidator: (v)=> !!v || '请输入目标路径'
+  }).then(({ value }) => {
+    const destDir = value.trim()
+    if (!destDir) return
+    loading.value = true
+    if (targets.length === 1) {
+      const t = targets[0]
+      socket.value.emit('move', { dirPath: currentPath.value, destDir, name: t.name })
+    } else {
+      socket.value.emit('move_batch', { dirPath: currentPath.value, destDir, targets: targets.map(t=>({ name:t.name })) })
+    }
+  })
+}
+
+const handleCopy = (row) => {
+  const targets = selectedRows.value.length > 1 && selectedRows.value.includes(row) ? selectedRows.value : [row,]
+  $messageBox.prompt('', '复制到...', {
+    inputType: 'text',
+    inputValue: currentPath.value + '/',
+    inputPlaceholder: '目标路径',
+    confirmButtonText: '确定',
+    cancelButtonText: '取消',
+    inputValidator: (v)=> !!v || '请输入目标路径'
+  }).then(({ value }) => {
+    const destDir = value.trim()
+    if (!destDir) return
+    loading.value = true
+    socket.value.emit('copy_server_batch', { dirPath: currentPath.value, destDir, targets: targets.map(t=>({ name:t.name })) })
+  })
 }
 </script>
 

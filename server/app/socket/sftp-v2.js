@@ -38,6 +38,116 @@ const listenAction = (sftpClient, socket, isRootUser) => {
       socket.emit('rename_fail', err.message)
     }
   })
+
+  // delete file/dir
+  socket.on('delete', async ({ dirPath, name, type }) => {
+    try {
+      const target = rawPath.posix.join(dirPath, name)
+      if (type === 'd') {
+        await sftpClient.rmdir(target, true)
+      } else {
+        await sftpClient.delete(target)
+      }
+      socket.emit('delete_success')
+      const dirLs = await sftpClient.list(dirPath)
+      socket.emit('dir_ls', dirLs, dirPath)
+    } catch (err) {
+      socket.emit('delete_fail', err.message)
+    }
+  })
+
+  socket.on('delete_batch', async ({ dirPath, targets }) => {
+    try {
+      for (const { name, type } of targets) {
+        const target = rawPath.posix.join(dirPath, name)
+        if (type === 'd') {
+          await sftpClient.rmdir(target, true)
+        } else {
+          await sftpClient.delete(target)
+        }
+      }
+      socket.emit('delete_success')
+      const dirLs = await sftpClient.list(dirPath)
+      socket.emit('dir_ls', dirLs, dirPath)
+    } catch (err) {
+      socket.emit('delete_fail', err.message)
+    }
+  })
+
+  // move file/dir
+  socket.on('move', async ({ dirPath, destDir, name }) => {
+    try {
+      const src = rawPath.posix.join(dirPath, name)
+      await ensureDir(destDir)
+      const dest = rawPath.posix.join(destDir, name)
+      await sftpClient.rename(src, dest)
+      socket.emit('move_success')
+      const dirLs = await sftpClient.list(dirPath)
+      socket.emit('dir_ls', dirLs, dirPath)
+    } catch (err) {
+      socket.emit('move_fail', err.message)
+    }
+  })
+
+  socket.on('move_batch', async ({ dirPath, destDir, targets }) => {
+    try {
+      await ensureDir(destDir)
+      for (const { name } of targets) {
+        const src = rawPath.posix.join(dirPath, name)
+        const dest = rawPath.posix.join(destDir, name)
+        await sftpClient.rename(src, dest)
+      }
+      socket.emit('move_success')
+      const dirLs = await sftpClient.list(dirPath)
+      socket.emit('dir_ls', dirLs, dirPath)
+    } catch (err) {
+      socket.emit('move_fail', err.message)
+    }
+  })
+
+  async function ensureDir(dir) {
+    const exists = await sftpClient.exists(dir)
+    if (!exists) {
+      await sftpClient.mkdir(dir, true)
+    }
+  }
+
+  const execCommand = (cmd) => new Promise((res, rej) => {
+    sftpClient.client.exec(cmd, (err, stream) => {
+      if (err) return rej(err)
+
+      let errMsg = ''
+      stream.stderr.on('data', d => (errMsg += d.toString()))
+
+      stream.on('exit', (code) => {
+        if (code === 0) res() // 成功
+        else rej(new Error(errMsg || `exit ${ code }`))
+      })
+
+      // 消耗 stdout 防止阻塞
+      stream.on('data', () => {})
+    })
+  })
+
+  // -------- copy (download then upload) --------
+  socket.on('copy_server_batch', async ({ dirPath, destDir, targets }) => {
+    try {
+      await ensureDir(destDir)
+      for (const { name } of targets) {
+        const src = rawPath.posix.join(dirPath, name)
+        // cp -r preserves dir/file, will overwrite if exists
+        const cmd = `cp -r -- "${ src }" "${ destDir }/"`
+        await execCommand(cmd)
+      }
+
+      socket.emit('copy_success')
+      const dirLs = await sftpClient.list(dirPath)
+      socket.emit('dir_ls', dirLs, dirPath)
+    } catch (err) {
+      consola.error('copy error:', err.message)
+      socket.emit('copy_fail', err.message)
+    }
+  })
 }
 
 module.exports = (httpServer) => {
