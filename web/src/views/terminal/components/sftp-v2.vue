@@ -486,13 +486,23 @@ const connectSftp = () => {
 
     socket.value.on('download_cancelled', ({ taskId }) => {
       downloadTasks.value.delete(taskId)
-      $message.info('下载已取消')
+    })
+
+    // SSH连接错误处理
+    socket.value.on('ssh_connection_error', ({ message, code }) => {
+      console.error('SFTP连接终端错误：', message, 'Code:', code)
+      $notification({
+        title: 'SFTP连接终端错误',
+        message: message,
+        type: 'error',
+        duration: 5000
+      })
     })
   })
 
   socket.value.on('connect_error', (err) => {
     console.error('sftp-v2 websocket 连接错误：', err)
-    $notification({ title: 'sftp连接失败', message: '请检查socket服务是否正常', type: 'error' })
+    $notification({ title: 'WebSocket连接失败', message: '请检查socket服务是否正常', type: 'error' })
   })
 }
 
@@ -671,13 +681,11 @@ const onRowContextMenu = (row, _column, event) => {
     },
   ]
 
-  // 只有在非多选状态下才显示下载菜单
-  if (!isMultiSelected) {
-    items.push({
-      label: '下载',
-      onClick: () => handleDownload(row)
-    })
-  }
+  // 始终显示下载菜单（支持单文件和多文件下载）
+  items.push({
+    label: '下载',
+    onClick: () => handleDownload(row)
+  })
 
   items.push(
     {
@@ -803,12 +811,15 @@ const handleCopy = (row) => {
 
 // 下载功能
 const handleDownload = (row) => {
-  // 只支持单文件/文件夹下载
-  const target = selectedRows.value.includes(row) ? row : row
+  // 支持单文件和多文件下载
+  const targets = selectedRows.value.length > 1 && selectedRows.value.includes(row)
+    ? selectedRows.value.map(r => ({ name: r.name, type: r.type }))
+    : [{ name: row.name, type: row.type },]
+
   loading.value = true
   socket.value.emit('download_request', {
     dirPath: currentPath.value,
-    target: { name: target.name, type: target.type }
+    targets
   })
 }
 

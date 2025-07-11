@@ -116,20 +116,83 @@ const listenAction = (sftpClient, socket, isRootUser) => {
   }
 
   const execCommand = (cmd) => new Promise((res, rej) => {
-    sftpClient.client.exec(cmd, (err, stream) => {
-      if (err) return rej(err)
+    // 检查SSH客户端连接状态
+    if (!sftpClient || !sftpClient.client) {
+      return rej(new Error('SSH客户端未初始化'))
+    }
 
-      let errMsg = ''
-      stream.stderr.on('data', d => (errMsg += d.toString()))
+    // 检查底层socket连接状态
+    if (sftpClient.client._sock && sftpClient.client._sock.destroyed) {
+      return rej(new Error('SSH连接已断开'))
+    }
 
-      stream.on('exit', (code) => {
-        if (code === 0) res() // 成功
-        else rej(new Error(errMsg || `exit ${ code }`))
+    try {
+      sftpClient.client.exec(cmd, (err, stream) => {
+        if (err) {
+          consola.error('执行命令失败:', cmd, err.message)
+          return rej(err)
+        }
+
+        let errMsg = ''
+        let isResolved = false
+
+        // 设置超时保护（30秒）
+        const timeout = setTimeout(() => {
+          if (!isResolved) {
+            isResolved = true
+            consola.warn('命令执行超时:', cmd)
+            rej(new Error(`命令执行超时: ${ cmd }`))
+          }
+        }, 30000)
+
+        // 处理错误输出
+        stream.stderr.on('data', d => {
+          errMsg += d.toString()
+        })
+
+        // 处理错误事件
+        stream.on('error', (streamErr) => {
+          if (!isResolved) {
+            isResolved = true
+            clearTimeout(timeout)
+            consola.error('Stream错误:', cmd, streamErr.message)
+            rej(streamErr)
+          }
+        })
+
+        // 处理连接断开
+        stream.on('close', (hadError) => {
+          if (!isResolved && hadError) {
+            isResolved = true
+            clearTimeout(timeout)
+            consola.error('Stream意外关闭:', cmd)
+            rej(new Error('连接意外断开'))
+          }
+        })
+
+        // 处理命令退出
+        stream.on('exit', (code) => {
+          if (!isResolved) {
+            isResolved = true
+            clearTimeout(timeout)
+            if (code === 0) {
+              consola.info('命令执行成功:', cmd)
+              res() // 成功
+            } else {
+              const errorMessage = errMsg || `命令退出码: ${ code }`
+              consola.error('命令执行失败:', cmd, errorMessage)
+              rej(new Error(errorMessage))
+            }
+          }
+        })
+
+        // 消耗 stdout 防止阻塞
+        stream.on('data', () => {})
       })
-
-      // 消耗 stdout 防止阻塞
-      stream.on('data', () => {})
-    })
+    } catch (execErr) {
+      consola.error('execCommand异常:', cmd, execErr.message)
+      rej(execErr)
+    }
   })
 
   // -------- copy (download then upload) --------
@@ -153,13 +216,15 @@ const listenAction = (sftpClient, socket, isRootUser) => {
   })
 
   // 下载功能
-  socket.on('download_request', async ({ dirPath, target }) => {
+  socket.on('download_request', async ({ dirPath, targets }) => {
+    let remoteTarPath = null // 跟踪远程临时文件路径
+    let taskId = null // 声明在外层以便错误处理时访问
     try {
-      if (!target) {
-        throw new Error('未选择要下载的文件(夹)')
+      if (!targets || targets.length === 0) {
+        throw new Error('未选择要下载的文件')
       }
 
-      const taskId = Date.now() + '-' + Math.random().toString(36).slice(2)
+      taskId = Date.now() + '-' + Math.random().toString(36).slice(2)
       const taskDir = rawPath.join(sftpCacheDir, taskId)
       await fs.ensureDir(taskDir)
 
@@ -168,59 +233,108 @@ const listenAction = (sftpClient, socket, isRootUser) => {
         abortController,
         startTime: Date.now(),
         totalSize: 0,
-        downloadedSize: 0
+        downloadedSize: 0,
+        remoteTarPath: null // 跟踪远程临时文件
       })
 
-      socket.emit('download_started', { taskId, fileName: target.name })
+      if (targets.length === 1) {
+        // 单文件/文件夹逻辑（保持原有逻辑）
+        const target = targets[0]
+        socket.emit('download_started', { taskId, fileName: target.name })
+        const srcPath = rawPath.posix.join(dirPath, target.name)
 
-      const srcPath = rawPath.posix.join(dirPath, target.name)
+        if (target.type === 'd') {
+          // 文件夹：先在远端打包
+          const tarFileName = `${ target.name }.tar.gz`
+          remoteTarPath = `/tmp/${ taskId }.tar.gz`
+          const localTarPath = rawPath.join(taskDir, tarFileName)
 
-      if (target.type === 'd') {
-        // 文件夹：先在远端打包
-        const tarFileName = `${ target.name }.tar.gz`
-        const remoteTarPath = `/tmp/${ taskId }.tar.gz`
-        const localTarPath = rawPath.join(taskDir, tarFileName)
+          // 保存远程文件路径到任务中
+          downloadTasks.get(taskId).remoteTarPath = remoteTarPath
+
+          // 检查是否被取消
+          if (abortController.signal.aborted) {
+            await cleanupRemoteTarFile(remoteTarPath)
+            throw new Error('下载已取消')
+          }
+
+          // 在远端打包
+          consola.info(`开始打包文件夹: ${ srcPath }`)
+          const tarCmd = `cd "${ dirPath }" && tar -czf "${ remoteTarPath }" "${ target.name }"`
+          try {
+            await execCommand(tarCmd)
+            consola.info(`打包文件夹: ${ srcPath } 成功`)
+          } catch (tarErr) {
+            consola.error('打包文件夹失败:', tarErr.message)
+            throw new Error(`打包文件夹失败: ${ tarErr.message }`)
+          }
+
+          // 获取打包文件大小
+          const statResult = await sftpClient.stat(remoteTarPath)
+          downloadTasks.get(taskId).totalSize = statResult.size
+
+          // 下载打包文件
+          await downloadFileWithProgress(sftpClient, remoteTarPath, localTarPath, taskId, downloadTasks, socket, abortController)
+
+          // 下载完成后立即清理远端临时文件
+          await cleanupRemoteTarFile(remoteTarPath)
+          remoteTarPath = null // 已清理，置空
+
+          socket.emit('download_ready', { taskId, fileName: tarFileName })
+        } else {
+          // 单文件：直接下载
+          const localFilePath = rawPath.join(taskDir, target.name)
+
+          // 获取文件大小
+          const statResult = await sftpClient.stat(srcPath)
+          downloadTasks.get(taskId).totalSize = statResult.size
+
+          await downloadFileWithProgress(sftpClient, srcPath, localFilePath, taskId, downloadTasks, socket, abortController)
+
+          socket.emit('download_ready', { taskId, fileName: target.name })
+        }
+      } else {
+        // 多文件逻辑：打包所有选中的文件/文件夹
+        const archiveName = `selected-files-${ Date.now() }.tar.gz`
+        remoteTarPath = `/tmp/${ taskId }.tar.gz`
+        const localTarPath = rawPath.join(taskDir, archiveName)
+
+        // 保存远程文件路径到任务中
+        downloadTasks.get(taskId).remoteTarPath = remoteTarPath
+
+        socket.emit('download_started', { taskId, fileName: archiveName })
 
         // 检查是否被取消
         if (abortController.signal.aborted) {
+          await cleanupRemoteTarFile(remoteTarPath)
           throw new Error('下载已取消')
         }
 
-        // 在远端打包
-        consola.info(`开始打包文件夹: ${ srcPath }`)
-        const tarCmd = `cd "${ dirPath }" && tar -czf "${ remoteTarPath }" "${ target.name }"`
-        await execCommand(tarCmd)
-        consola.info(`打包文件夹: ${ srcPath } 成功`)
+        // 构建tar命令，打包所有选中的文件/文件夹
+        const fileNames = targets.map(t => `"${ t.name }"`).join(' ')
+        const tarCmd = `cd "${ dirPath }" && tar -czf "${ remoteTarPath }" ${ fileNames }`
+
+        consola.info(`开始打包多个文件: ${ targets.map(t => t.name).join(', ') }`)
+        try {
+          await execCommand(tarCmd)
+          consola.info('打包多个文件成功')
+        } catch (tarErr) {
+          consola.error('打包失败:', tarErr.message)
+          throw new Error(`打包失败: ${ tarErr.message }`)
+        }
+
         // 获取打包文件大小
         const statResult = await sftpClient.stat(remoteTarPath)
-        const totalSize = statResult.size
-
-        downloadTasks.get(taskId).totalSize = totalSize
+        downloadTasks.get(taskId).totalSize = statResult.size
 
         // 下载打包文件
         await downloadFileWithProgress(sftpClient, remoteTarPath, localTarPath, taskId, downloadTasks, socket, abortController)
 
-        // 清理远端临时文件
-        try {
-          await execCommand(`rm -f "${ remoteTarPath }"`)
-        } catch (cleanupErr) {
-          consola.warn('清理远端临时文件失败:', cleanupErr.message)
-        }
+        // 下载完成后立即清理远端临时文件
+        await cleanupRemoteTarFile(remoteTarPath)
+        remoteTarPath = null // 已清理，置空
 
-        socket.emit('download_ready', { taskId, fileName: tarFileName })
-      } else {
-        // 单文件：直接下载
-        const localFilePath = rawPath.join(taskDir, target.name)
-
-        // 获取文件大小
-        const statResult = await sftpClient.stat(srcPath)
-        const totalSize = statResult.size
-
-        downloadTasks.get(taskId).totalSize = totalSize
-
-        await downloadFileWithProgress(sftpClient, srcPath, localFilePath, taskId, downloadTasks, socket, abortController)
-
-        socket.emit('download_ready', { taskId, fileName: target.name })
+        socket.emit('download_ready', { taskId, fileName: archiveName })
       }
 
       downloadTasks.delete(taskId)
@@ -228,12 +342,28 @@ const listenAction = (sftpClient, socket, isRootUser) => {
       consola.error('下载失败:', err.message)
       socket.emit('download_fail', err.message)
 
-      // 清理任务
-      if (err.taskId) {
-        downloadTasks.delete(err.taskId)
+      // 清理远程临时文件（如果还存在）
+      if (remoteTarPath) {
+        await cleanupRemoteTarFile(remoteTarPath)
+      }
+
+      // 清理任务（如果taskId存在）
+      if (taskId) {
+        downloadTasks.delete(taskId)
       }
     }
   })
+
+  // 清理远程tar文件的辅助函数
+  async function cleanupRemoteTarFile(remoteTarPath) {
+    if (!remoteTarPath) return
+    try {
+      await execCommand(`rm -f "${ remoteTarPath }"`)
+      consola.info(`已清理远程临时文件: ${ remoteTarPath }`)
+    } catch (cleanupErr) {
+      consola.warn('清理远程临时文件失败:', remoteTarPath, cleanupErr.message)
+    }
+  }
 
   // 取消下载
   socket.on('download_cancel', ({ taskId }) => {
@@ -261,14 +391,32 @@ const listenAction = (sftpClient, socket, isRootUser) => {
   }
 
   // 监听连接断开，清理下载任务和缓存
-  socket.on('disconnect', () => {
-    // 取消所有下载任务
+  socket.on('disconnect', async () => {
+    // 清理所有远程临时文件
+    const remoteCleanupPromises = []
     for (const [taskId, task] of downloadTasks) {
+      // 取消下载任务
       task.abortController.abort()
+
+      // 如果有远程临时文件，添加到清理列表
+      if (task.remoteTarPath) {
+        remoteCleanupPromises.push(cleanupRemoteTarFile(task.remoteTarPath))
+      }
     }
+
+    // 并行清理所有远程临时文件
+    if (remoteCleanupPromises.length > 0) {
+      try {
+        await Promise.all(remoteCleanupPromises)
+        consola.info(`连接断开时已清理 ${ remoteCleanupPromises.length } 个远程临时文件`)
+      } catch (err) {
+        consola.warn('连接断开时清理远程临时文件部分失败:', err.message)
+      }
+    }
+
     downloadTasks.clear()
 
-    // 清理缓存目录
+    // 清理本地缓存目录
     cleanupCacheDir()
   })
 
@@ -408,6 +556,29 @@ module.exports = (httpServer) => {
       consola.log('连接信息', { username, port, authType })
 
       sftpClient.client = new SSHClient()
+
+      // 添加错误处理器，防止程序崩溃
+      sftpClient.client.on('error', (err) => {
+        consola.error('SSH客户端错误:', err.message)
+        // 发送SSH连接错误事件，而不是WebSocket连接失败事件
+        socket.emit('ssh_connection_error', {
+          message: `SSH连接错误: ${ err.message }`,
+          code: err.code || 'UNKNOWN'
+        })
+      })
+
+      sftpClient.client.on('end', () => {
+        consola.info('SSH连接正常结束')
+      })
+
+      sftpClient.client.on('close', (hadError) => {
+        if (hadError) {
+          consola.warn('SSH连接异常关闭')
+        } else {
+          consola.info('SSH连接已关闭')
+        }
+      })
+
       sftpClient.client.on('keyboard-interactive', function (name, instructions, instructionsLang, prompts, finish) {
         finish([targetConnectionOptions[authType]])
       })

@@ -1,4 +1,5 @@
 const koaStatic = require('koa-static')
+const path = require('path')
 const { sftpCacheDir } = require('../config')
 
 const useSftpCacheStatic = async (ctx, next) => {
@@ -14,9 +15,10 @@ const useSftpCacheStatic = async (ctx, next) => {
     const staticMiddleware = koaStatic(sftpCacheDir, {
       maxage: 0,
       gzip: true,
-      setHeaders: (res, path) => {
+      setHeaders: (res, filePath) => {
         // 强制下载而不是在浏览器中打开
-        const filename = path.split('/').pop()
+        const filename = path.basename(filePath)
+
         res.setHeader('Content-Disposition', `attachment; filename="${ encodeURIComponent(filename) }"`)
       }
     })
