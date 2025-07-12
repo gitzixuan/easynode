@@ -57,16 +57,17 @@
           @blur="cancelEditPath"
         />
       </template>
-      <el-icon class="action_icon" @click="toggleEditPath"><Edit /></el-icon>
-      <el-icon class="action_icon" @click="refresh"><Refresh /></el-icon>
-      <el-icon class="action_icon" @click="toggleHidden">
+      <el-icon class="action_icon" title="编辑路径" @click="toggleEditPath"><Edit /></el-icon>
+      <el-icon class="action_icon" title="复制当前路径" @click="copyCurrentPath"><DocumentCopy /></el-icon>
+      <el-icon class="action_icon" title="刷新" @click="refresh"><Refresh /></el-icon>
+      <el-icon class="action_icon" :title="showHidden ? '隐藏隐藏文件' : '显示隐藏文件'" @click="toggleHidden">
         <View v-if="showHidden" />
         <Hide v-else />
       </el-icon>
       <el-icon
         v-if="hasDownloadTasks"
         class="action_icon download_icon"
-        :title="`正在下载 ${activeDownloadTasks.length} 个任务`"
+        :title="`下载管理 - 正在下载 ${activeDownloadTasks.length} 个任务`"
         @click="showDownloadManager"
       >
         <Download />
@@ -253,8 +254,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch, getCurrentInstance, nextTick } from 'vue'
-import { ArrowDown, ArrowLeft, Refresh, View, Hide, Edit, ArrowRight, HomeFilled, Check, Close as CloseIcon, Download } from '@element-plus/icons-vue'
+import { ref, computed, onMounted, watch, getCurrentInstance, nextTick } from 'vue'
+import { ArrowDown, ArrowLeft, Refresh, View, Hide, Edit, ArrowRight, HomeFilled, Check, Close as CloseIcon, Download, DocumentCopy } from '@element-plus/icons-vue'
 import socketIo from 'socket.io-client'
 import dirIcon from '@/assets/image/system/dir.png'
 import linkIcon from '@/assets/image/system/link.png'
@@ -615,6 +616,14 @@ const confirmPathInput = () => {
 
 const cancelEditPath = () => {
   isEditingPath.value = false
+}
+
+const copyCurrentPath = () => {
+  navigator.clipboard.writeText(currentPath.value).then(() => {
+    $message.success('路径已复制到剪贴板')
+  }).catch(() => {
+    $message.error('复制失败')
+  })
 }
 
 const handleUpload = (type) => {
@@ -996,10 +1005,10 @@ const formatTime = (seconds) => {
     padding: 0 10px;
     display: flex;
     align-items: center;
-    gap: 6px;
     border-bottom: 1px solid var(--el-border-color);
 
     .breadcrumb_wrap {
+      line-height: 30px;
       flex: 1;
       display: flex;
       align-items: center;
@@ -1016,6 +1025,9 @@ const formatTime = (seconds) => {
         display: flex;
         align-items: center;
         color: var(--el-color-primary);
+        & > span {
+          margin-top: -2px;
+        }
         .separator {
           margin: 0 4px;
           width: 14px;
@@ -1035,6 +1047,12 @@ const formatTime = (seconds) => {
     .action_icon {
       cursor: pointer;
       font-size: 16px;
+      margin-left: 12px;
+
+      &:first-of-type {
+        margin-left: 16px;
+      }
+
       &:hover {
         color: var(--el-color-primary);
       }
