@@ -38,27 +38,46 @@
         </el-dropdown>
 
         <!-- 新建 -->
-        <el-dropdown trigger="click">
-          <el-button ref="newBtnRef" size="small">
-            新建 <el-icon><ArrowDown /></el-icon>
-          </el-button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item @click="handleNew('file')">新建文件</el-dropdown-item>
-              <el-dropdown-item @click="handleNew('folder')">新建文件夹</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
+        <div style="position: relative;">
+          <el-dropdown trigger="click">
+            <el-button ref="newBtnRef" size="small">
+              新建 <el-icon><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item @click="handleNew('file')">新建文件</el-dropdown-item>
+                <el-dropdown-item @click="handleNew('folder')">新建文件夹</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <!-- 隐藏的触发元素，用于 Popover 定位 -->
+          <div ref="createPopoverRef" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;" />
+        </div>
 
         <!-- 收藏 -->
-        <el-dropdown trigger="click">
+        <el-dropdown v-if="hasFavorites" trigger="click">
           <el-button type="" size="small">
             收藏 <el-icon><ArrowDown /></el-icon>
           </el-button>
           <template #dropdown>
-            <el-dropdown-menu>
-            <!-- <el-dropdown-item @click="handleUpload('file')">收藏文件</el-dropdown-item>
-            <el-dropdown-item @click="handleUpload('folder')">收藏文件夹</el-dropdown-item> -->
+            <el-dropdown-menu class="favorite_dropdown">
+              <el-dropdown-item
+                v-for="favorite in favoriteList"
+                :key="favorite._id"
+                class="favorite_item"
+                @click="navigateToFavorite(favorite)"
+              >
+                <div class="favorite_content">
+                  <span class="favorite_path" :title="favorite.path">{{ favorite.path }}</span>
+                  <el-icon
+                    class="delete_icon"
+                    title="删除收藏"
+                    @click.stop="removeFavorite(favorite)"
+                  >
+                    <Delete />
+                  </el-icon>
+                </div>
+              </el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -131,7 +150,7 @@
           show-overflow-tooltip
         >
           <template #default="{ row }">
-            <div class="file_name_cell">
+            <div class="file_name_cell" @mouseenter="row._showStar = true" @mouseleave="row._showStar = false">
               <img :src="getIcon(row.type)" class="file_icon">
               <template v-if="isEditing(row)">
                 <el-input
@@ -146,6 +165,15 @@
               </template>
               <template v-else>
                 <span class="file_name" v-text="row.name" />
+                <el-icon
+                  v-if="row._showStar"
+                  class="star_icon"
+                  :title="isFavorited(row) ? '取消收藏' : '收藏'"
+                  @click.stop="toggleFavorite(row)"
+                >
+                  <StarFilled v-if="isFavorited(row)" />
+                  <Star v-else />
+                </el-icon>
               </template>
             </div>
           </template>
@@ -291,7 +319,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, getCurrentInstance, nextTick } from 'vue'
-import { ArrowDown, ArrowLeft, Refresh, View, Hide, Edit, ArrowRight, HomeFilled, Check, Close as CloseIcon, Download, DocumentCopy, Loading, WarningFilled } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, Refresh, View, Hide, Edit, ArrowRight, HomeFilled, Check, Close as CloseIcon, Download, DocumentCopy, Loading, WarningFilled, Star, StarFilled, Delete } from '@element-plus/icons-vue'
 import socketIo from 'socket.io-client'
 import dirIcon from '@/assets/image/system/dir.png'
 import linkIcon from '@/assets/image/system/link.png'
@@ -307,7 +335,7 @@ const props = defineProps({
 })
 
 // 组件实例上下文
-const { proxy: { $store, $message, $notification, $serviceURI, $messageBox } } = getCurrentInstance()
+const { proxy: { $store, $message, $serviceURI, $messageBox } } = getCurrentInstance()
 
 // 路径 & 隐藏文件显示
 const currentPath = ref('/')
@@ -356,7 +384,7 @@ const tableRef = ref(null)
 const showCreatePopover = ref(false)
 const createType = ref('folder') // 'folder' | 'file'
 const createName = ref('')
-const createPopoverRef = ref(null) // 固定参照元素 (新建按钮)
+const createPopoverRef = ref(null) // Popover定位元素
 const newBtnRef = ref(null)
 const createInputRef = ref(null)
 
@@ -367,7 +395,9 @@ const { showMenu } = useContextMenu()
 const showDownloadDialog = ref(false)
 const downloadTasks = ref(new Map()) // taskId -> 下载任务信息
 
-// 计算属性：是否有下载任务
+// 收藏相关状态
+const favoriteList = ref([]) // 收藏列表
+
 const hasDownloadTasks = computed(() => downloadTasks.value.size > 0)
 
 // 计算属性：正在进行的下载任务列表
@@ -380,14 +410,14 @@ const completedDownloadTasks = computed(() => {
   return Array.from(downloadTasks.value.values()).filter(task => task.status === 'completed')
 })
 
+// 计算属性：是否有收藏
+const hasFavorites = computed(() => favoriteList.value.length > 0)
+
 //----------------------------------
 // 初始化
 //----------------------------------
 onMounted(() => {
   connectSftp()
-  nextTick(() => {
-    createPopoverRef.value = newBtnRef.value
-  })
 })
 
 onUnmounted(() => {
@@ -430,6 +460,8 @@ const connectSftp = () => {
       currentPath.value = '/'
       connectionStatus.value = 'connected'
       loading.value = false
+      // 获取收藏列表
+      getFavoriteList()
     })
 
     socket.value.on('connect_fail', (msg) => {
@@ -523,6 +555,29 @@ const connectSftp = () => {
     socket.value.on('decompress_fail', (msg) => {
       $message.error(`解压失败: ${ msg }`)
       loading.value = false
+    })
+
+    // 收藏相关事件
+    socket.value.on('favorites_list', (favorites) => {
+      favoriteList.value = favorites
+    })
+
+    socket.value.on('favorite_added', (message) => {
+      $message.success(message || '收藏成功')
+      getFavoriteList()
+      // 刷新文件列表以更新星标显示
+      refresh()
+    })
+
+    socket.value.on('favorite_removed', (message) => {
+      $message.success(message || '取消收藏成功')
+      getFavoriteList()
+      // 刷新文件列表以更新星标显示
+      refresh()
+    })
+
+    socket.value.on('favorite_error', (message) => {
+      $message.error(`收藏操作失败: ${ message }`)
     })
 
     // 下载相关事件
@@ -711,7 +766,6 @@ const handleNew = (type) => {
   // 等待 Popover 完全显示后再聚焦
   setTimeout(() => {
     if (createInputRef.value) {
-      // Element Plus el-input 组件的聚焦方法
       createInputRef.value.focus()
     }
   }, 100)
@@ -1057,6 +1111,67 @@ const formatTime = (seconds) => {
   if (seconds < 3600) return Math.round(seconds / 60) + ' 分钟'
   return Math.round(seconds / 3600) + ' 小时'
 }
+
+// 收藏相关功能
+const isFavorited = (row) => {
+  const fullPath = currentPath.value === '/'
+    ? `/${ row.name }`
+    : `${ currentPath.value }/${ row.name }`
+  return favoriteList.value.some(fav => fav.path === fullPath)
+}
+
+const toggleFavorite = (row) => {
+  if (!socket.value) return
+
+  const fullPath = currentPath.value === '/'
+    ? `/${ row.name }`
+    : `${ currentPath.value }/${ row.name }`
+
+  const isCurrentlyFavorited = isFavorited(row)
+
+  if (isCurrentlyFavorited) {
+    // 取消收藏
+    socket.value.emit('remove_favorite', {
+      hostId: props.hostId,
+      path: fullPath
+    })
+  } else {
+    // 添加收藏
+    socket.value.emit('add_favorite', {
+      hostId: props.hostId,
+      path: fullPath,
+      name: row.name,
+      type: row.type === 'd' ? 'folder' : 'file'
+    })
+  }
+}
+
+const getFavoriteList = () => {
+  if (!socket.value) return
+  socket.value.emit('get_favorites', { hostId: props.hostId })
+}
+
+const removeFavorite = (favoriteItem) => {
+  if (!socket.value) return
+  socket.value.emit('remove_favorite', {
+    hostId: props.hostId,
+    path: favoriteItem.path
+  })
+}
+
+const navigateToFavorite = (favorite) => {
+  if (favorite.type === 'folder') {
+    // 导航到文件夹
+    currentPath.value = favorite.path
+    openDir(favorite.path, true)
+  } else {
+    // 文件：导航到文件所在目录，留待以后处理文件打开逻辑
+    const dirPath = favorite.path.substring(0, favorite.path.lastIndexOf('/')) || '/'
+    currentPath.value = dirPath
+    openDir(dirPath, true)
+    // TODO: 高亮或选中该文件
+  }
+}
 </script>
 
 <style lang="scss" scoped>
@@ -1152,13 +1267,23 @@ const formatTime = (seconds) => {
     display: flex;
     align-items: center;
     cursor: pointer;
+    position: relative;
+    min-width: 0; // 允许flex子元素缩小
+
     .file_icon {
       width: 16px;
       height: 16px;
       margin-right: 4px;
+      flex-shrink: 0; // 图标不缩小
     }
     .file_name {
       color: var(--el-color-primary);
+      flex: 1;
+      min-width: 0; // 允许文本缩小
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      padding-right: 24px; // 为星标留出空间
     }
     .rename_input {
       width: 120px;
@@ -1170,6 +1295,14 @@ const formatTime = (seconds) => {
       font-size: 14px;
       color: var(--el-color-success);
       &:last-child { color: var(--el-color-danger); }
+    }
+    .star_icon {
+      position: absolute;
+      right: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      color: var(--el-color-warning);
+      flex-shrink: 0; // 星标不缩小
     }
   }
 
@@ -1347,5 +1480,43 @@ const formatTime = (seconds) => {
   font-size: 48px;
   color: var(--el-color-info-light-5);
   margin-bottom: 12px;
+}
+
+/* 收藏下拉菜单样式 */
+.favorite_dropdown {
+  width: 250px !important;
+
+  .favorite_item {
+    .favorite_content {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      width: 100%;
+
+      .favorite_path {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        margin-right: 8px;
+      }
+
+      .delete_icon {
+        color: var(--el-color-danger);
+        cursor: pointer;
+        font-size: 14px;
+        opacity: 0;
+        transition: opacity 0.3s ease;
+
+        &:hover {
+          color: var(--el-color-danger-dark-2);
+        }
+      }
+    }
+
+    &:hover .favorite_content .delete_icon {
+      opacity: 1;
+    }
+  }
 }
 </style>

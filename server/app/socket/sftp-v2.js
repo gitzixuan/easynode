@@ -567,6 +567,74 @@ const listenAction = (sftpClient, socket, isRootUser) => {
     }
   }
 
+  // -------- 收藏相关功能 --------
+
+  // 获取收藏列表
+  socket.on('get_favorites', async ({ hostId }) => {
+    try {
+      const favorites = await favoriteSftpDB.findAsync({ hostId }, { sort: { createTime: -1 } })
+      socket.emit('favorites_list', favorites)
+    } catch (err) {
+      consola.error('获取收藏列表失败:', err.message)
+      socket.emit('favorite_error', '获取收藏列表失败')
+    }
+  })
+
+  // 添加收藏
+  socket.on('add_favorite', async ({ hostId, path, name, type }) => {
+    try {
+      if (!hostId || !path || !name || !type) {
+        throw new Error('缺少必要参数')
+      }
+
+      // 检查是否已存在相同路径的收藏
+      const existing = await favoriteSftpDB.findOneAsync({ hostId, path })
+      if (existing) {
+        socket.emit('favorite_error', '该路径已经收藏过了')
+        return
+      }
+
+      // 添加新收藏
+      const newFavorite = {
+        hostId,
+        path,
+        name,
+        type,
+        createTime: Date.now()
+      }
+
+      await favoriteSftpDB.insertAsync(newFavorite)
+      socket.emit('favorite_added', `收藏 "${ name }" 成功`)
+
+      consola.info(`用户收藏了路径: ${ path }`)
+    } catch (err) {
+      consola.error('添加收藏失败:', err.message)
+      socket.emit('favorite_error', err.message)
+    }
+  })
+
+  // 删除收藏
+  socket.on('remove_favorite', async ({ hostId, path }) => {
+    try {
+      if (!hostId || !path) {
+        throw new Error('缺少必要参数')
+      }
+
+      const result = await favoriteSftpDB.removeAsync({ hostId, path }, {})
+
+      if (result === 0) {
+        socket.emit('favorite_error', '收藏不存在')
+        return
+      }
+
+      socket.emit('favorite_removed', '取消收藏成功')
+      consola.info(`用户取消收藏路径: ${ path }`)
+    } catch (err) {
+      consola.error('删除收藏失败:', err.message)
+      socket.emit('favorite_error', err.message)
+    }
+  })
+
   // 监听连接断开，清理下载任务和缓存
   socket.on('disconnect', async () => {
     // 清理所有远程临时文件

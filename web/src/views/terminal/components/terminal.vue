@@ -9,7 +9,7 @@
           :teleported="false"
           class="dropdown_menu"
         >
-          <span class="link_text">连接<el-icon><arrow-down /></el-icon></span>
+          <span class="link_text">连接<el-icon class="link_icon"><arrow-down /></el-icon></span>
           <template #dropdown>
             <el-cascader-panel
               v-if="hostGroupCascader"
@@ -46,7 +46,7 @@
           :teleported="false"
           class="dropdown_menu"
         >
-          <span class="link_text">脚本库<el-icon><arrow-down /></el-icon></span>
+          <span class="link_text">脚本库<el-icon class="link_icon"><arrow-down /></el-icon></span>
           <template #dropdown>
             <el-cascader-panel
               v-if="scriptLibraryCascader"
@@ -69,29 +69,10 @@
             </el-dropdown-menu>
           </template>
         </el-dropdown>
-        <!-- <el-dropdown trigger="click">
-          <span class="link_text">分屏<el-icon><arrow-down /></el-icon></span>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item @click="handleFullScreen">
-                <span>双屏</span>
-              </el-dropdown-item>
-              <el-dropdown-item @click="handleFullScreen">
-                <span>三屏</span>
-              </el-dropdown-item>
-              <el-dropdown-item @click="handleFullScreen">
-                <span>四屏</span>
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown> -->
         <el-dropdown trigger="click">
-          <span class="link_text">功能项<el-icon><arrow-down /></el-icon></span>
+          <span class="link_text">功能项<el-icon class="link_icon"><arrow-down /></el-icon></span>
           <template #dropdown>
             <el-dropdown-menu>
-              <!-- <el-dropdown-item @click="showInputCommand = true">
-                <span>长指令输入</span>
-              </el-dropdown-item> -->
               <el-dropdown-item @click="handleFullScreen">
                 <span>启用全屏</span>
               </el-dropdown-item>
@@ -859,7 +840,11 @@ const handleInputCommand = async (command) => {
       // color: var(--el-color-primary);
       cursor: pointer;
       margin-right: 10px;
-
+      display: flex;
+      align-items: center;
+      .link_icon {
+        margin-left: 5px;
+      }
       .hidden_icon {
         opacity: 0;
       }
