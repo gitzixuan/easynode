@@ -11,7 +11,7 @@
   >
     <template #header>
       <div class="dialog-header">
-        <span class="dialog-title">{{ title }}</span>
+        <span class="dialog-title">{{ title }} - {{ formatFileSize(fileSize) }}</span>
         <el-button
           link
           size="small"
@@ -23,13 +23,6 @@
       </div>
     </template>
     <div class="text-editor-container">
-      <div class="editor-header">
-        <div class="file-info">
-          <span class="file-path">{{ filePath }}</span>
-          <span class="file-size">{{ formatFileSize(fileSize) }}</span>
-        </div>
-      </div>
-
       <!-- 工具栏 -->
       <div class="editor-toolbar">
         <div class="toolbar-item">
@@ -97,6 +90,9 @@
 
       <!-- 底部按钮 -->
       <div class="editor-footer">
+        <el-button size="small" @click="closeDialog">
+          关闭
+        </el-button>
         <el-button size="small" @click="resetFile">
           重置
         </el-button>
@@ -169,7 +165,7 @@ let disposables = []
 let shouldCloseAfterSave = false
 
 const title = computed(() => {
-  return `编辑文件 - ${ props.fileName }${ hasChanges.value ? ' [已变更]' : '' }`
+  return `编辑文件 - ${ props.filePath } ${ hasChanges.value ? ' [已变更]' : '' }`
 })
 
 // 文件类型到语言的映射
@@ -539,31 +535,6 @@ onUnmounted(() => {
   flex-direction: column;
   height: 88vh;
 
-  .editor-header {
-    display: flex;
-    justify-content: flex-start;
-    align-items: center;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--el-border-color-light);
-    background-color: var(--el-bg-color-page);
-
-    .file-info {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-
-      .file-path {
-        font-weight: 500;
-        color: var(--el-text-color-primary);
-      }
-
-      .file-size {
-        font-size: 12px;
-        color: var(--el-text-color-secondary);
-      }
-    }
-  }
-
   .editor-toolbar {
     display: flex;
     align-items: center;
@@ -597,7 +568,7 @@ onUnmounted(() => {
 
     .monaco-editor {
       height: 100%;
-      border: 1px solid var(--el-border-color-light);
+      border: 1px solid var(--el-border-color-dark);
     }
   }
 
