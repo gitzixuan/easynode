@@ -168,6 +168,7 @@
                   v-model="editingName"
                   size="small"
                   class="rename_input"
+                  @click.stop
                   @keyup.enter.stop="confirmRename(row)"
                   @keyup.esc.stop="cancelRename"
                 />
@@ -1610,12 +1611,25 @@ function timeFormatter(row, column, cellValue) {
 
 const handleDelete = (row) => {
   const targets = selectedRows.value.length > 1 && selectedRows.value.includes(row) ? selectedRows.value : [row,]
-  const namesStr = targets.map(t => t.name).join(', ')
 
-  $messageBox.confirm(`确认删除以下文件(夹)：\n${ namesStr }`, 'Warning', {
-    confirmButtonText: '确定',
+  // 格式化文件名，长文件名进行截断
+  const formatFileName = (name) => {
+    if (name.length <= 50) return name
+    return name.substring(0, 25) + '...' + name.substring(name.length - 22)
+  }
+
+  const namesStr = targets.map(t => formatFileName(t.name)).join('\n')
+  const fileCount = targets.length
+
+  const message = fileCount === 1
+    ? `确认删除以下文件(夹)：\n\n${ namesStr }`
+    : `确认删除以下 ${ fileCount } 个文件(夹)：\n\n${ namesStr }`
+
+  $messageBox.confirm(message, '删除确认', {
+    confirmButtonText: '确定删除',
     cancelButtonText: '取消',
-    type: 'warning'
+    type: 'warning',
+    customClass: 'delete-confirm-dialog'
   }).then(() => {
     loading.value = true
     socket.value.emit('delete_batch', { dirPath: currentPath.value, targets: targets.map(t=>({ name:t.name, type:t.type })) })
@@ -2216,7 +2230,7 @@ const clearCompletedTasks = () => {
       }
 
       &.upload_icon {
-        color: var(--el-color-primary);
+        color: var(--el-color-success);
         animation: pulse 1.5s ease-in-out infinite;
       }
     }
@@ -2589,6 +2603,22 @@ const clearCompletedTasks = () => {
     &:hover .favorite_content .delete_icon {
       opacity: 1;
     }
+  }
+}
+
+/* 删除确认对话框样式 */
+.delete-confirm-dialog {
+  .el-message-box__content {
+    max-height: 300px;
+    overflow-y: auto;
+    word-break: break-all;
+    white-space: pre-wrap;
+  }
+
+  .el-message-box__message {
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 1.5;
   }
 }
 </style>
