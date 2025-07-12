@@ -78,6 +78,20 @@
           <label>缩略图</label>
           <el-switch v-model="minimapEnabled" size="small" @change="toggleMinimap" />
         </div>
+
+        <div v-if="minimapEnabled" class="toolbar-item">
+          <label>缩略图大小</label>
+          <el-select
+            v-model="minimapSize"
+            size="small"
+            class="size-select"
+            @change="changeMinimapSize"
+          >
+            <el-option label="小" value="small" />
+            <el-option label="中" value="medium" />
+            <el-option label="大" value="large" />
+          </el-select>
+        </div>
       </div>
 
       <div
@@ -102,7 +116,7 @@
           size="small"
           @click="saveFile"
         >
-          确认
+          保存
         </el-button>
       </div>
     </div>
@@ -159,6 +173,7 @@ const selectedLanguage = ref('plaintext')
 const selectedEOL = ref('LF')
 const wordWrapEnabled = ref(true)
 const minimapEnabled = ref(true)
+const minimapSize = ref('medium') // 默认中等大小
 
 let editor = null
 let disposables = []
@@ -167,6 +182,25 @@ let shouldCloseAfterSave = false
 const title = computed(() => {
   return `编辑文件 - ${ props.filePath } ${ hasChanges.value ? ' [已变更]' : '' }`
 })
+
+// 缩略图配置映射
+const minimapConfigs = {
+  small: {
+    scale: 0.6,
+    maxColumn: 80,
+    size: 'proportional'
+  },
+  medium: {
+    scale: 1,
+    maxColumn: 120,
+    size: 'proportional'
+  },
+  large: {
+    scale: 1.5,
+    maxColumn: 160,
+    size: 'proportional'
+  }
+}
 
 // 文件类型到语言的映射
 const getLanguageFromFileName = (fileName) => {
@@ -227,6 +261,8 @@ const initEditor = () => {
   const language = getLanguageFromFileName(props.fileName)
   selectedLanguage.value = language
 
+  const minimapConfig = minimapConfigs[minimapSize.value]
+
   editor = monaco.editor.create(editorContainer.value, {
     value: '',
     language: language,
@@ -235,7 +271,12 @@ const initEditor = () => {
     wordWrap: wordWrapEnabled.value ? 'on' : 'off',
     automaticLayout: true,
     scrollBeyondLastLine: false,
-    minimap: { enabled: minimapEnabled.value },
+    minimap: {
+      enabled: minimapEnabled.value,
+      scale: minimapConfig.scale,
+      maxColumn: minimapConfig.maxColumn,
+      size: minimapConfig.size
+    },
     lineNumbers: 'on',
     glyphMargin: false,
     folding: true,
@@ -388,8 +429,28 @@ const toggleWordWrap = (enabled) => {
 
 const toggleMinimap = (enabled) => {
   if (editor) {
+    const minimapConfig = minimapConfigs[minimapSize.value]
     editor.updateOptions({
-      minimap: { enabled }
+      minimap: {
+        enabled,
+        scale: minimapConfig.scale,
+        maxColumn: minimapConfig.maxColumn,
+        size: minimapConfig.size
+      }
+    })
+  }
+}
+
+const changeMinimapSize = (size) => {
+  if (editor) {
+    const config = minimapConfigs[size]
+    editor.updateOptions({
+      minimap: {
+        enabled: minimapEnabled.value,
+        scale: config.scale,
+        maxColumn: config.maxColumn,
+        size: config.size
+      }
     })
   }
 }
@@ -558,6 +619,10 @@ onUnmounted(() => {
 
       .el-select {
         width: 140px;
+
+        &.size-select {
+          width: 80px;
+        }
       }
     }
   }
@@ -568,7 +633,7 @@ onUnmounted(() => {
 
     .monaco-editor {
       height: 100%;
-      border: 1px solid var(--el-border-color-dark);
+      border: 1px solid var(--el-border-color-light);
     }
   }
 
