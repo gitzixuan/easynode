@@ -217,6 +217,16 @@
         </template>
       </el-popover>
 
+      <!-- 文本编辑器 -->
+      <TextEditor
+        v-model="showTextEditor"
+        :file-path="textEditorConfig.filePath"
+        :file-name="textEditorConfig.fileName"
+        :file-size="textEditorConfig.fileSize"
+        :socket="socket"
+        @saved="onTextFileSaved"
+      />
+
       <!-- 下载任务管理对话框 -->
       <el-dialog
         v-model="showDownloadDialog"
@@ -326,6 +336,7 @@ import linkIcon from '@/assets/image/system/link.png'
 import fileIcon from '@/assets/image/system/file.png'
 import unknowIcon from '@/assets/image/system/unknow.png'
 import { useContextMenu } from '@/composables/useContextMenu'
+import TextEditor from '@/components/text-editor/index.vue'
 
 const props = defineProps({
   hostId: {
@@ -397,6 +408,14 @@ const downloadTasks = ref(new Map()) // taskId -> 下载任务信息
 
 // 收藏相关状态
 const favoriteList = ref([]) // 收藏列表
+
+// 文本编辑器相关状态
+const showTextEditor = ref(false)
+const textEditorConfig = ref({
+  filePath: '',
+  fileName: '',
+  fileSize: 0
+})
 
 const hasDownloadTasks = computed(() => downloadTasks.value.size > 0)
 
@@ -684,13 +703,6 @@ const goParent = () => {
   openDir(currentPath.value)
 }
 
-const changePath = () => {
-  if (!currentPath.value) {
-    currentPath.value = '/'
-  }
-  refresh()
-}
-
 const toggleHidden = () => {
   showHidden.value = !showHidden.value
 }
@@ -796,7 +808,8 @@ const onRowClick = (row) => {
     currentPath.value = newPath
     openDir(newPath, true)
   } else {
-    // 文件 — 暂无处理
+    // 文件 → 根据文件类型处理
+    handleFileOpen(row)
   }
 }
 
@@ -806,6 +819,63 @@ const onSelectionChange = (rows) => {
 
 const isArchiveFile = (filename) => {
   return /(\.zip|\.tar\.gz|\.tgz|\.tar|\.rar)$/i.test(filename)
+}
+
+// 判断是否为文本文件
+const isTextFile = (filename) => {
+  const textExtensions = [
+    'txt', 'log', 'md', 'markdown', 'json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'conf', 'config',
+    'js', 'ts', 'jsx', 'tsx', 'vue', 'html', 'css', 'scss', 'sass', 'less', 'styl',
+    'py', 'java', 'cpp', 'c', 'h', 'hpp', 'cs', 'php', 'rb', 'go', 'rs', 'swift', 'kt',
+    'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat', 'cmd',
+    'sql', 'dockerfile', 'makefile', 'cmake', 'gradle', 'properties',
+    'gitignore', 'gitattributes', 'editorconfig', 'prettierrc', 'eslintrc', 'tsconfig',
+  ]
+
+  // 获取文件扩展名
+  const ext = filename.split('.').pop()?.toLowerCase()
+
+  // 检查是否在文本扩展名列表中
+  if (ext && textExtensions.includes(ext)) {
+    return true
+  }
+
+  // 检查无扩展名的常见文本文件
+  const commonTextFiles = [
+    'readme', 'license', 'changelog', 'todo', 'authors', 'contributors',
+    'makefile', 'dockerfile', 'gemfile', 'rakefile', 'gulpfile', 'gruntfile',
+  ]
+
+  return commonTextFiles.includes(filename.toLowerCase())
+}
+
+// 处理文件打开
+const handleFileOpen = (row) => {
+  // 检查文件大小限制（1MB）
+  const maxFileSize = 1024 * 1024 // 1MB
+  if (row.size > maxFileSize) {
+    $message.warning(`文件过大（${ sizeFormatter(row, null, row.size) }），仅支持编辑小于1MB的文件`)
+    return
+  }
+
+  // 检查是否为文本文件
+  if (isTextFile(row.name)) {
+    // 打开文本编辑器
+    const fullPath = currentPath.value === '/'
+      ? `/${ row.name }`
+      : `${ currentPath.value }/${ row.name }`
+
+    textEditorConfig.value = {
+      filePath: fullPath,
+      fileName: row.name,
+      fileSize: row.size
+    }
+
+    showTextEditor.value = true
+  } else {
+    // 非文本文件，暂时提示
+    $message.info(`文件 "${ row.name }" 不是文本文件，暂不支持在线编辑`)
+  }
 }
 
 // ============== Rename ==============
@@ -850,12 +920,20 @@ const onRowContextMenu = (row, _column, event) => {
   // 检查是否为多选状态
   const isMultiSelected = selectedRows.value.length > 1
 
-  const items = [
-    {
-      label: '收藏',
-      onClick: () => $message.info('收藏 (占位)')
-    },
-  ]
+  const items = []
+
+  // 编辑选项（仅对单个文本文件显示）
+  // if (!isMultiSelected && row.type === '-' && isTextFile(row.name)) {
+  //   items.push({
+  //     label: '编辑',
+  //     onClick: () => handleFileOpen(row)
+  //   })
+  // }
+
+  items.push({
+    label: '收藏',
+    onClick: () => $message.info('收藏 (占位)')
+  })
 
   // 始终显示下载菜单（支持单文件和多文件下载）
   items.push({
@@ -1165,12 +1243,43 @@ const navigateToFavorite = (favorite) => {
     currentPath.value = favorite.path
     openDir(favorite.path, true)
   } else {
-    // 文件：导航到文件所在目录，留待以后处理文件打开逻辑
-    const dirPath = favorite.path.substring(0, favorite.path.lastIndexOf('/')) || '/'
-    currentPath.value = dirPath
-    openDir(dirPath, true)
-    // TODO: 高亮或选中该文件
+    // 文件：检查是否为文本文件，如果是则直接打开编辑器
+    if (isTextFile(favorite.name)) {
+      // 先设置当前路径，然后打开文本编辑器
+      const dirPath = favorite.path.substring(0, favorite.path.lastIndexOf('/')) || '/'
+      currentPath.value = dirPath
+
+      // 模拟文件对象来复用handleFileOpen逻辑
+      const fileRow = {
+        name: favorite.name,
+        size: 0, // 收藏中没有保存大小信息，先设为0，后续在编辑器中会检查
+        type: '-'
+      }
+
+      textEditorConfig.value = {
+        filePath: favorite.path,
+        fileName: favorite.name,
+        fileSize: 0
+      }
+
+      showTextEditor.value = true
+    } else {
+      // 非文本文件：导航到文件所在目录
+      const dirPath = favorite.path.substring(0, favorite.path.lastIndexOf('/')) || '/'
+      currentPath.value = dirPath
+      openDir(dirPath, true)
+      // TODO: 高亮或选中该文件
+    }
   }
+}
+
+// 文本文件保存成功回调
+const onTextFileSaved = ({ filePath }) => {
+  // 刷新当前目录以更新文件修改时间等信息
+  refresh()
+
+  // 可以在这里添加其他保存成功后的处理逻辑
+  console.log('文本文件保存成功:', filePath)
 }
 </script>
 
@@ -1395,7 +1504,9 @@ const navigateToFavorite = (favorite) => {
 }
 
 .download_task_list {
-  space-y: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .download_task_item {

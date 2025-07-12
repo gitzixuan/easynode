@@ -635,6 +635,78 @@ const listenAction = (sftpClient, socket, isRootUser) => {
     }
   })
 
+  // -------- 文本文件编辑功能 --------
+
+  // 读取文件内容
+  socket.on('read_file', async ({ filePath, fileSize }) => {
+    try {
+      // 检查文件大小限制 (1MB)
+      const maxFileSize = 1024 * 1024
+      if (fileSize > maxFileSize) {
+        socket.emit('file_read_error', {
+          error: `文件过大（${ Math.round(fileSize / 1024 / 1024 * 100) / 100 }MB），仅支持编辑小于1MB的文件`,
+          filePath
+        })
+        return
+      }
+
+      // 检查文件是否存在
+      const exists = await sftpClient.exists(filePath)
+      if (!exists) {
+        socket.emit('file_read_error', {
+          error: '文件不存在',
+          filePath
+        })
+        return
+      }
+
+      // 读取文件内容
+      consola.info(`开始读取文件: ${ filePath }`)
+      const buffer = await sftpClient.get(filePath)
+      const content = buffer.toString('utf8')
+
+      consola.info(`文件读取成功: ${ filePath }，大小: ${ content.length } 字符`)
+      socket.emit('file_content', { content, filePath })
+
+    } catch (err) {
+      consola.error('读取文件失败:', err.message)
+      socket.emit('file_read_error', {
+        error: err.message,
+        filePath
+      })
+    }
+  })
+
+  // 保存文件内容
+  socket.on('save_file', async ({ filePath, content }) => {
+    try {
+      // 检查内容大小限制 (1MB)
+      const maxFileSize = 1024 * 1024
+      const contentSize = Buffer.byteLength(content, 'utf8')
+      if (contentSize > maxFileSize) {
+        socket.emit('file_save_error', {
+          error: `文件内容过大（${ Math.round(contentSize / 1024 / 1024 * 100) / 100 }MB），仅支持保存小于1MB的文件`,
+          filePath
+        })
+        return
+      }
+
+      // 保存文件内容
+      consola.info(`开始保存文件: ${ filePath }，大小: ${ content.length } 字符`)
+      await sftpClient.put(Buffer.from(content, 'utf8'), filePath)
+
+      consola.info(`文件保存成功: ${ filePath }`)
+      socket.emit('file_saved', { filePath })
+
+    } catch (err) {
+      consola.error('保存文件失败:', err.message)
+      socket.emit('file_save_error', {
+        error: err.message,
+        filePath
+      })
+    }
+  })
+
   // 监听连接断开，清理下载任务和缓存
   socket.on('disconnect', async () => {
     // 清理所有远程临时文件
