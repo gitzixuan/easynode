@@ -635,6 +635,37 @@ const listenAction = (sftpClient, socket, isRootUser) => {
     }
   })
 
+  // -------- 软链接解析功能 --------
+
+  // 解析软链接的真实路径
+  socket.on('resolve_symlink', async ({ symlinkPath }) => {
+    try {
+      // 获取软链接的真实路径
+      consola.info(`解析软链接: ${ symlinkPath }`)
+      const realPath = await sftpClient.realPath(symlinkPath)
+      consola.info(`软链接真实路径: ${ realPath }`)
+
+      // 检查真实路径是否存在
+      const stats = await sftpClient.stat(realPath)
+      const isDirectory = stats.isDirectory
+
+      socket.emit('symlink_resolved', {
+        realPath,
+        isDirectory,
+        symlinkPath
+      })
+
+      consola.info(`软链接解析成功: ${ symlinkPath } -> ${ realPath } (${ isDirectory ? '目录' : '文件' })`)
+
+    } catch (err) {
+      consola.error('软链接解析失败:', err.message)
+      socket.emit('symlink_resolve_error', {
+        error: err.message,
+        symlinkPath
+      })
+    }
+  })
+
   // -------- 文本文件编辑功能 --------
 
   // 读取文件内容

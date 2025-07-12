@@ -599,6 +599,40 @@ const connectSftp = () => {
       $message.error(`收藏操作失败: ${ message }`)
     })
 
+    // 软链接解析相关事件
+    socket.value.on('symlink_resolved', ({ realPath, isDirectory, symlinkPath }) => {
+      console.log('解析软链接成功:', realPath, isDirectory, symlinkPath)
+      loading.value = false
+
+      if (isDirectory) {
+        // 软链接指向目录，导航到真实目录
+        currentPath.value = realPath
+        openDir(realPath, true)
+        $message.success(`已跳转到软链接指向的目录: ${ realPath }`)
+      } else {
+        // 软链接指向文件，尝试打开文件
+        const fileName = realPath.split('/').pop()
+
+        // 检查是否为文本文件
+        if (isTextFile(fileName)) {
+          textEditorConfig.value = {
+            filePath: realPath,
+            fileName: fileName,
+            fileSize: 0 // 软链接文件大小需要单独获取
+          }
+          showTextEditor.value = true
+        } else {
+          $message.info(`软链接指向文件: ${ realPath }，暂不支持在线编辑`)
+        }
+      }
+    })
+
+    socket.value.on('symlink_resolve_error', ({ error, symlinkPath }) => {
+      loading.value = false
+      console.error('解析软链接失败:', error, symlinkPath)
+      $message.error(`解析软链接失败: ${ error }`)
+    })
+
     // 下载相关事件
     socket.value.on('download_started', ({ taskId, fileName }) => {
       const newTask = {
@@ -807,6 +841,9 @@ const onRowClick = (row) => {
     const newPath = `${ base }/${ row.name }`.replace(/\/+/g, '/').replace(/\/\/$/, '/')
     currentPath.value = newPath
     openDir(newPath, true)
+  } else if (row.type === 'l') {
+    // 软链接 → 解析真实路径
+    handleSymlinkClick(row)
   } else {
     // 文件 → 根据文件类型处理
     handleFileOpen(row)
@@ -878,6 +915,21 @@ const handleFileOpen = (row) => {
   }
 }
 
+// 处理软链接点击
+const handleSymlinkClick = (row) => {
+  if (!socket.value) return
+
+  loading.value = true
+  const symlinkPath = currentPath.value === '/'
+    ? `/${ row.name }`
+    : `${ currentPath.value }/${ row.name }`
+
+  // 请求解析软链接的真实路径
+  socket.value.emit('resolve_symlink', {
+    symlinkPath: symlinkPath
+  })
+}
+
 // ============== Rename ==============
 const editingRow = ref(null)
 const editingName = ref('')
@@ -921,19 +973,6 @@ const onRowContextMenu = (row, _column, event) => {
   const isMultiSelected = selectedRows.value.length > 1
 
   const items = []
-
-  // 编辑选项（仅对单个文本文件显示）
-  // if (!isMultiSelected && row.type === '-' && isTextFile(row.name)) {
-  //   items.push({
-  //     label: '编辑',
-  //     onClick: () => handleFileOpen(row)
-  //   })
-  // }
-
-  items.push({
-    label: '收藏',
-    onClick: () => $message.info('收藏 (占位)')
-  })
 
   // 始终显示下载菜单（支持单文件和多文件下载）
   items.push({
@@ -1035,7 +1074,7 @@ const handleMove = (row) => {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     inputType: 'text',
-    inputValue: currentPath.value + '/',
+    inputValue: currentPath.value === '/' ? '/' : currentPath.value + '/',
     inputPlaceholder: '目标路径',
     inputValidator: (v)=> !!v || '请输入目标路径'
   }).then(({ value }) => {
@@ -1055,7 +1094,7 @@ const handleCopy = (row) => {
   const targets = selectedRows.value.length > 1 && selectedRows.value.includes(row) ? selectedRows.value : [row,]
   $messageBox.prompt('', '复制到...', {
     inputType: 'text',
-    inputValue: currentPath.value + '/',
+    inputValue: currentPath.value === '/' ? '/' : currentPath.value + '/',
     inputPlaceholder: '目标路径',
     confirmButtonText: '确定',
     cancelButtonText: '取消',
