@@ -95,9 +95,9 @@
               @click="handleBreadcrumb(idx)"
             >
               <template v-if="idx!==0">
-                <ArrowRight class="separator" />
+                <el-icon><ArrowRight /></el-icon>
               </template>
-              <span v-if="idx===0"><HomeFilled /></span>
+              <span v-if="idx===0"><el-icon><HomeFilled /></el-icon></span>
               <span v-else>{{ seg }}</span>
             </span>
           </div>
