@@ -97,7 +97,10 @@
               <template v-if="idx!==0">
                 <el-icon><ArrowRight /></el-icon>
               </template>
-              <span v-if="idx===0"><el-icon><HomeFilled /></el-icon></span>
+              <span v-if="idx===0">
+                <el-icon><HomeFilled /></el-icon>
+                <span v-if="seg !== '/' && seg !== '~'">{{ seg }}</span>
+              </span>
               <span v-else>{{ seg }}</span>
             </span>
           </div>
@@ -555,6 +558,10 @@ const loading = ref(false)
 const connectionStatus = ref('connecting') // connecting, connected, failed, reconnecting
 const connectionError = ref('')
 
+// 路径切换状态管理
+const previousPath = ref('') // 用于错误回滚
+const pendingPath = ref('') // 待确认的路径
+
 const fileListRaw = ref([])
 
 function getRank(item) {
@@ -658,6 +665,9 @@ onUnmounted(() => {
     socket.value.close()
     socket.value = null
   }
+  // 清空路径状态
+  previousPath.value = ''
+  pendingPath.value = ''
 })
 
 //----------------------------------
@@ -687,11 +697,16 @@ const connectSftp = () => {
   socket.value.on('connect', () => {
     socket.value.emit('ws_sftp', { hostId: props.hostId, token: token.value })
 
-    socket.value.on('connect_success', ({ rootList }) => {
+    socket.value.on('connect_success', ({ rootList, isRootUser, currentPath: serverCurrentPath }) => {
       fileListRaw.value = rootList
-      currentPath.value = '/'
+      // 根据用户权限设置正确的初始路径
+      currentPath.value = serverCurrentPath || (isRootUser ? '/' : '~')
+      // 清空路径状态
+      previousPath.value = ''
+      pendingPath.value = ''
       connectionStatus.value = 'connected'
       loading.value = false
+      console.log('SFTP连接成功, 初始路径:', currentPath.value, ', 是否root用户:', isRootUser)
       // 获取收藏列表
       getFavoriteList()
     })
@@ -700,18 +715,33 @@ const connectSftp = () => {
       connectionStatus.value = 'failed'
       connectionError.value = msg
       loading.value = false
+      // 清空路径状态
+      previousPath.value = ''
+      pendingPath.value = ''
     })
 
     socket.value.on('dir_ls', (dirLs, path) => {
       fileListRaw.value = dirLs
       loading.value = false
-      if (path) currentPath.value = path
-      currentPath.value = path || currentPath.value
+
+      // 确认路径切换成功
+      if (path) {
+        currentPath.value = path
+        previousPath.value = '' // 清空之前的路径
+        pendingPath.value = '' // 清空待确认路径
+      }
     })
 
     socket.value.on('not_exists_dir', (msg) => {
       if (msg) $message.warning(msg)
       loading.value = false
+
+      // 回滚到之前的路径
+      if (previousPath.value) {
+        currentPath.value = previousPath.value
+        previousPath.value = '' // 清空
+        pendingPath.value = '' // 清空
+      }
     })
 
     socket.value.on('rename_success', () => {
@@ -819,8 +849,7 @@ const connectSftp = () => {
 
       if (isDirectory) {
         // 软链接指向目录，导航到真实目录
-        currentPath.value = realPath
-        openDir(realPath, true)
+        switchToPath(realPath, true)
         $message.success(`已跳转到软链接指向的目录: ${ realPath }`)
       } else {
         // 软链接指向文件，尝试打开文件
@@ -983,6 +1012,10 @@ const connectSftp = () => {
   // 添加断开连接监听，实现自动重连
   socket.value.on('disconnect', (reason) => {
     console.warn('SFTP连接断开:', reason)
+    // 清空路径状态
+    previousPath.value = ''
+    pendingPath.value = ''
+
     if (connectionStatus.value === 'connected') {
       // 只有在之前连接成功的情况下才自动重连
       setTimeout(() => {
@@ -998,6 +1031,9 @@ const connectSftp = () => {
     connectionStatus.value = 'failed'
     connectionError.value = 'WebSocket连接失败，请检查网络或服务器状态'
     loading.value = false
+    // 清空路径状态
+    previousPath.value = ''
+    pendingPath.value = ''
   })
 }
 
@@ -1007,17 +1043,60 @@ const openDir = (path = currentPath.value, tips = true) => {
   loading.value = true
 }
 
+// 安全的路径切换函数
+const switchToPath = (newPath, tips = true) => {
+  if (!socket.value) return
+
+  // 保存当前路径用于可能的回滚
+  previousPath.value = currentPath.value
+  pendingPath.value = newPath
+
+  // 发送路径切换请求
+  socket.value.emit('open_dir', newPath, tips)
+  loading.value = true
+}
+
 //----------------------------------
 // 文件操作相关（占位实现）
 //----------------------------------
-const refresh = () => openDir(currentPath.value, false)
+const refresh = () => {
+  // 刷新当前目录，不需要路径验证，直接使用openDir
+  openDir(currentPath.value, false)
+}
 
 const goParent = () => {
-  if (currentPath.value === '/') return
-  const arr = currentPath.value.split('/').filter(Boolean)
-  arr.pop()
-  currentPath.value = '/' + arr.join('/')
-  openDir(currentPath.value)
+  const path = currentPath.value
+
+  // 已经在根目录或home目录，无法再向上
+  if (path === '/' || path === '~') return
+
+  let newPath
+
+  // 处理绝对路径
+  if (path.startsWith('/')) {
+    const arr = path.split('/').filter(Boolean)
+    arr.pop()
+    newPath = arr.length === 0 ? '/' : '/' + arr.join('/')
+  }
+  // 处理相对路径（从~开始）
+  else if (path.startsWith('~')) {
+    if (path === '~' || path === '~/') {
+      return // 已经在home目录
+    }
+    const relativePart = path.substring(2) // 去掉 '~/' 前缀
+    const arr = relativePart.split('/').filter(Boolean)
+    arr.pop()
+    newPath = arr.length === 0 ? '~' : '~/' + arr.join('/')
+  }
+  // 其他情况
+  else {
+    const arr = path.split('/').filter(Boolean)
+    arr.pop()
+    newPath = arr.length === 0 ? '/' : '/' + arr.join('/')
+  }
+
+  // 使用安全的路径切换
+  switchToPath(newPath)
 }
 
 const toggleHidden = () => {
@@ -1029,8 +1108,28 @@ const isEditingPath = ref(false)
 const pathInput = ref('')
 
 const breadcrumb = computed(() => {
-  if (currentPath.value === '/') return ['/',]
-  const segs = currentPath.value.split('/').filter(Boolean)
+  const path = currentPath.value
+
+  // 处理特殊路径
+  if (path === '/' || path === '~') {
+    return [path === '/' ? '/' : '~',]
+  }
+
+  // 处理绝对路径
+  if (path.startsWith('/')) {
+    const segs = path.split('/').filter(Boolean)
+    return ['/', ...segs,]
+  }
+
+  // 处理相对路径（从~开始）
+  if (path.startsWith('~')) {
+    if (path === '~') return ['~',]
+    const segs = path.substring(2).split('/').filter(Boolean) // 去掉 '~/' 前缀
+    return ['~', ...segs,]
+  }
+
+  // 其他情况，按原来的逻辑处理
+  const segs = path.split('/').filter(Boolean)
   return ['/', ...segs,]
 })
 
@@ -1046,13 +1145,35 @@ function scrollToEnd() {
 watch(currentPath, () => scrollToEnd())
 
 const handleBreadcrumb = (idx) => {
+  const segments = breadcrumb.value
+  let newPath
+
   if (idx === 0) {
-    currentPath.value = '/'
+    // 点击第一个段（根目录或home目录）
+    newPath = segments[0] // '/' 或 '~'
   } else {
-    const segs = breadcrumb.value.slice(1, idx + 1)
-    currentPath.value = '/' + segs.join('/')
+    // 点击其他段
+    if (segments[0] === '/') {
+      // 绝对路径
+      const segs = segments.slice(1, idx + 1)
+      newPath = '/' + segs.join('/')
+    } else if (segments[0] === '~') {
+      // 相对路径（从home开始）
+      if (idx === 1) {
+        newPath = '~/' + segments[1]
+      } else {
+        const segs = segments.slice(1, idx + 1)
+        newPath = '~/' + segs.join('/')
+      }
+    } else {
+      // 其他情况，按原来的逻辑处理
+      const segs = segments.slice(1, idx + 1)
+      newPath = '/' + segs.join('/')
+    }
   }
-  openDir(currentPath.value, true)
+
+  // 使用安全的路径切换
+  switchToPath(newPath, true)
 }
 
 const toggleEditPath = () => {
@@ -1066,9 +1187,9 @@ const toggleEditPath = () => {
 
 const confirmPathInput = () => {
   if (!pathInput.value) return
-  currentPath.value = pathInput.value
   isEditingPath.value = false
-  openDir(currentPath.value, true)
+  // 使用安全的路径切换
+  switchToPath(pathInput.value, true)
 }
 
 const cancelEditPath = () => {
@@ -1077,7 +1198,7 @@ const cancelEditPath = () => {
 
 const copyCurrentPath = () => {
   navigator.clipboard.writeText(currentPath.value).then(() => {
-    $message.success('路径已复制到剪贴板')
+    $message.success('路径已复制')
   }).catch(() => {
     $message.error('复制失败')
   })
@@ -1126,10 +1247,24 @@ const confirmCreate = () => {
 const onRowClick = (row) => {
   // 文件夹 → 进入下级
   if (row.type === 'd') {
-    const base = currentPath.value === '/' ? '' : currentPath.value
-    const newPath = `${ base }/${ row.name }`.replace(/\/+/g, '/').replace(/\/\/$/, '/')
-    currentPath.value = newPath
-    openDir(newPath, true)
+    let newPath
+    const currentPathValue = currentPath.value
+
+    if (currentPathValue === '/') {
+      newPath = `/${ row.name }`
+    } else if (currentPathValue === '~') {
+      newPath = `~/${ row.name }`
+    } else if (currentPathValue.endsWith('/')) {
+      newPath = `${ currentPathValue }${ row.name }`
+    } else {
+      newPath = `${ currentPathValue }/${ row.name }`
+    }
+
+    // 清理多余的斜杠
+    newPath = newPath.replace(/\/+/g, '/')
+
+    // 使用安全的路径切换
+    switchToPath(newPath, true)
   } else if (row.type === 'l') {
     // 软链接 → 解析真实路径
     handleSymlinkClick(row)
@@ -1187,9 +1322,17 @@ const handleFileOpen = (row) => {
   // 检查是否为文本文件
   if (isTextFile(row.name)) {
     // 打开文本编辑器
-    const fullPath = currentPath.value === '/'
-      ? `/${ row.name }`
-      : `${ currentPath.value }/${ row.name }`
+    let fullPath
+    const currentPathValue = currentPath.value
+
+    if (currentPathValue === '/' || currentPathValue === '~') {
+      fullPath = `${ currentPathValue === '/' ? '' : currentPathValue }/${ row.name }`
+    } else {
+      fullPath = `${ currentPathValue }/${ row.name }`
+    }
+
+    // 清理路径
+    fullPath = fullPath.replace(/\/+/g, '/')
 
     textEditorConfig.value = {
       filePath: fullPath,
@@ -1209,9 +1352,17 @@ const handleSymlinkClick = (row) => {
   if (!socket.value) return
 
   loading.value = true
-  const symlinkPath = currentPath.value === '/'
-    ? `/${ row.name }`
-    : `${ currentPath.value }/${ row.name }`
+  let symlinkPath
+  const currentPathValue = currentPath.value
+
+  if (currentPathValue === '/' || currentPathValue === '~') {
+    symlinkPath = `${ currentPathValue === '/' ? '' : currentPathValue }/${ row.name }`
+  } else {
+    symlinkPath = `${ currentPathValue }/${ row.name }`
+  }
+
+  // 清理路径
+  symlinkPath = symlinkPath.replace(/\/+/g, '/')
 
   // 请求解析软链接的真实路径
   socket.value.emit('resolve_symlink', {
@@ -1308,7 +1459,19 @@ const onRowContextMenu = (row, _column, event) => {
   items.push({
     label: '复制路径',
     onClick: () => {
-      navigator.clipboard.writeText(currentPath.value + '/' + row.name)
+      let fullPath
+      const currentPathValue = currentPath.value
+
+      if (currentPathValue === '/' || currentPathValue === '~') {
+        fullPath = `${ currentPathValue === '/' ? '' : currentPathValue }/${ row.name }`
+      } else {
+        fullPath = `${ currentPathValue }/${ row.name }`
+      }
+
+      // 清理路径
+      fullPath = fullPath.replace(/\/+/g, '/')
+
+      navigator.clipboard.writeText(fullPath)
       $message.success('已复制路径')
     }
   })
@@ -1525,18 +1688,35 @@ const formatTime = (seconds) => {
 
 // 收藏相关功能
 const isFavorited = (row) => {
-  const fullPath = currentPath.value === '/'
-    ? `/${ row.name }`
-    : `${ currentPath.value }/${ row.name }`
+  let fullPath
+  const currentPathValue = currentPath.value
+
+  if (currentPathValue === '/' || currentPathValue === '~') {
+    fullPath = `${ currentPathValue === '/' ? '' : currentPathValue }/${ row.name }`
+  } else {
+    fullPath = `${ currentPathValue }/${ row.name }`
+  }
+
+  // 清理路径
+  fullPath = fullPath.replace(/\/+/g, '/')
+
   return favoriteList.value.some(fav => fav.path === fullPath)
 }
 
 const toggleFavorite = (row) => {
   if (!socket.value) return
 
-  const fullPath = currentPath.value === '/'
-    ? `/${ row.name }`
-    : `${ currentPath.value }/${ row.name }`
+  let fullPath
+  const currentPathValue = currentPath.value
+
+  if (currentPathValue === '/' || currentPathValue === '~') {
+    fullPath = `${ currentPathValue === '/' ? '' : currentPathValue }/${ row.name }`
+  } else {
+    fullPath = `${ currentPathValue }/${ row.name }`
+  }
+
+  // 清理路径
+  fullPath = fullPath.replace(/\/+/g, '/')
 
   const isCurrentlyFavorited = isFavorited(row)
 
@@ -1573,14 +1753,12 @@ const removeFavorite = (favoriteItem) => {
 const navigateToFavorite = (favorite) => {
   if (favorite.type === 'folder') {
     // 导航到文件夹
-    currentPath.value = favorite.path
-    openDir(favorite.path, true)
+    switchToPath(favorite.path, true)
   } else {
     // 文件：检查是否为文本文件，如果是则直接打开编辑器
     if (isTextFile(favorite.name)) {
-      // 先设置当前路径，然后打开文本编辑器
+      // 先导航到文件所在目录，然后打开文本编辑器
       const dirPath = favorite.path.substring(0, favorite.path.lastIndexOf('/')) || '/'
-      currentPath.value = dirPath
 
       // 模拟文件对象来复用handleFileOpen逻辑
       const fileRow = {
@@ -1595,24 +1773,21 @@ const navigateToFavorite = (favorite) => {
         fileSize: 0
       }
 
+      // 先切换到文件所在目录，然后打开编辑器
+      switchToPath(dirPath, true)
       showTextEditor.value = true
     } else {
       // 非文本文件：导航到文件所在目录
       const dirPath = favorite.path.substring(0, favorite.path.lastIndexOf('/')) || '/'
-      currentPath.value = dirPath
-      openDir(dirPath, true)
-      // TODO: 高亮或选中该文件
+      switchToPath(dirPath, true)
     }
   }
 }
 
 // 文本文件保存成功回调
-const onTextFileSaved = ({ filePath }) => {
-  // 刷新当前目录以更新文件修改时间等信息
+const onTextFileSaved = () => {
   refresh()
-
-  // 可以在这里添加其他保存成功后的处理逻辑
-  console.log('文本文件保存成功:', filePath)
+  showTextEditor.value = false
 }
 
 // 上传相关功能

@@ -1285,6 +1285,8 @@ module.exports = (httpServer) => {
         fs.ensureDirSync(sftpCacheDir)
         let rootList = []
         let isRootUser = true
+        let currentWorkingDir = '/'
+
         try {
           rootList = await sftpClient.list('/')
           consola.success('获取根目录成功')
@@ -1292,11 +1294,27 @@ module.exports = (httpServer) => {
           consola.error('获取根目录失败:', error.message)
           consola.info('尝试获取当前目录')
           isRootUser = false
-          rootList = await sftpClient.list('./')
-          consola.success('获取当前目录成功')
+
+          try {
+            // 获取当前工作目录的绝对路径
+            currentWorkingDir = await sftpClient.cwd()
+            consola.info('当前工作目录:', currentWorkingDir)
+            rootList = await sftpClient.list(currentWorkingDir)
+            consola.success('获取当前目录成功')
+          } catch (cwdError) {
+            consola.warn('获取工作目录失败，使用相对路径:', cwdError.message)
+            currentWorkingDir = '~'
+            rootList = await sftpClient.list('./')
+            consola.success('获取当前目录成功')
+          }
         }
+
         // 普通文件-、目录文件d、链接文件l
-        socket.emit('connect_success', { rootList, isRootUser })
+        socket.emit('connect_success', {
+          rootList,
+          isRootUser,
+          currentPath: currentWorkingDir
+        })
         consola.success('连接sftp-v2 成功：', host)
         listenAction(sftpClient, socket, isRootUser)
       } catch (error) {
