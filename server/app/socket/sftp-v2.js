@@ -131,11 +131,24 @@ const listenAction = (sftpClient, socket, isRootUser) => {
       return rej(new Error('SSH连接已断开'))
     }
 
+    // 检查SSH客户端状态
+    if (sftpClient.client._readyTimeout === null && !sftpClient.client._authenticated) {
+      return rej(new Error('SSH客户端未认证'))
+    }
+
     try {
       sftpClient.client.exec(cmd, (err, stream) => {
         if (err) {
           consola.error('执行命令失败:', cmd, err.message)
+          // 检查是否是连接相关错误
+          if (err.message.includes('Not connected') || err.message.includes('Connection lost')) {
+            return rej(new Error('SSH连接已断开，无法执行命令'))
+          }
           return rej(err)
+        }
+
+        if (!stream) {
+          return rej(new Error('无法创建命令执行流'))
         }
 
         let errMsg = ''
@@ -149,7 +162,14 @@ const listenAction = (sftpClient, socket, isRootUser) => {
             timeout = null
           }
           if (stream) {
-            stream.removeAllListeners()
+            try {
+              stream.removeAllListeners()
+              if (!stream.destroyed) {
+                stream.destroy()
+              }
+            } catch (cleanupErr) {
+              consola.warn('清理stream失败:', cleanupErr.message)
+            }
           }
         }
 
@@ -166,7 +186,7 @@ const listenAction = (sftpClient, socket, isRootUser) => {
           }
         }
 
-        // 设置超时保护（30秒）
+        // 设置超时保护（60秒）
         timeout = setTimeout(() => {
           consola.warn('命令执行超时:', cmd)
           resolveOnce(new Error(`命令执行超时: ${ cmd }`), true)
@@ -180,14 +200,21 @@ const listenAction = (sftpClient, socket, isRootUser) => {
         // 处理错误事件
         stream.on('error', (streamErr) => {
           consola.error('Stream错误:', cmd, streamErr.message)
-          resolveOnce(streamErr, true)
+          if (streamErr.message.includes('Not connected')) {
+            resolveOnce(new Error('SSH连接在命令执行过程中断开'), true)
+          } else {
+            resolveOnce(streamErr, true)
+          }
         })
 
         // 处理连接断开
-        stream.on('close', (hadError) => {
-          if (hadError) {
-            consola.error('Stream意外关闭:', cmd)
-            resolveOnce(new Error('连接意外断开'), true)
+        stream.on('close', (code, signal) => {
+          if (errMsg) {
+            consola.error('命令执行错误:', cmd, errMsg)
+            resolveOnce(new Error(`命令执行失败: ${ errMsg }`), true)
+          } else {
+            consola.info('命令执行完成:', cmd)
+            resolveOnce('success')
           }
         })
 
@@ -724,6 +751,74 @@ const listenAction = (sftpClient, socket, isRootUser) => {
     }
   })
 
+  // -------- 图片预览功能 --------
+
+  // 读取图片文件内容
+  socket.on('read_image', async ({ filePath, fileSize }) => {
+    try {
+      // 检查文件大小限制 (10MB)
+      const maxFileSize = 10 * 1024 * 1024
+      if (fileSize > maxFileSize) {
+        socket.emit('image_read_error', {
+          error: `图片过大（${ Math.round(fileSize / 1024 / 1024 * 100) / 100 }MB），仅支持预览小于10MB的图片`,
+          filePath
+        })
+        return
+      }
+
+      // 检查文件是否存在
+      const exists = await sftpClient.exists(filePath)
+      if (!exists) {
+        socket.emit('image_read_error', {
+          error: '图片文件不存在',
+          filePath
+        })
+        return
+      }
+
+      // 检查是否为图片文件
+      const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'ico', 'tiff', 'tif']
+      const ext = rawPath.extname(filePath).toLowerCase().slice(1)
+      if (!imageExtensions.includes(ext)) {
+        socket.emit('image_read_error', {
+          error: '不支持的图片格式',
+          filePath
+        })
+        return
+      }
+
+      // 生成缓存文件名（使用时间戳避免冲突）
+      const fileName = rawPath.basename(filePath)
+      const timestamp = Date.now()
+      const cacheFileName = `image_${ timestamp }_${ fileName }`
+      const localImagePath = rawPath.join(sftpCacheDir, cacheFileName)
+
+      consola.info(`开始下载图片到缓存: ${ filePath } -> ${ localImagePath }`)
+
+      // 下载图片到本地缓存
+      await sftpClient.fastGet(filePath, localImagePath)
+
+      // 生成访问URL
+      const imageUrl = `/sftp-cache/${ cacheFileName }`
+
+      consola.info(`图片下载成功: ${ filePath }，缓存路径: ${ localImagePath }`)
+
+      socket.emit('image_content', {
+        imageUrl,
+        filePath,
+        fileName,
+        fileSize
+      })
+
+    } catch (err) {
+      consola.error('图片预览失败:', err.message)
+      socket.emit('image_read_error', {
+        error: err.message,
+        filePath
+      })
+    }
+  })
+
   // 保存文件内容
   socket.on('save_file', async ({ filePath, content }) => {
     try {
@@ -1008,62 +1103,82 @@ const listenAction = (sftpClient, socket, isRootUser) => {
   })
 
   // 监听连接断开，清理下载任务和缓存
-  socket.on('disconnect', async () => {
-    consola.info('SFTP连接断开，开始清理资源...')
+  socket.on('disconnect', async (reason) => {
+    try {
+      consola.info('SFTP连接断开，开始清理资源...', reason)
 
-    // 清理定时器
-    if (memoryCleanupInterval) {
-      clearInterval(memoryCleanupInterval)
-    }
-
-    // 清理所有远程临时文件
-    const remoteCleanupPromises = []
-    for (const [taskId, task] of downloadTasks) {
-      // 取消下载任务
-      if (task.abortController) {
-        task.abortController.abort()
+      // 清理定时器
+      if (memoryCleanupInterval) {
+        clearInterval(memoryCleanupInterval)
       }
 
-      // 如果有远程临时文件，添加到清理列表
-      if (task.remoteTarPath) {
-        remoteCleanupPromises.push(cleanupRemoteTarFile(task.remoteTarPath))
-      }
-    }
+      // 清理所有远程临时文件
+      const remoteCleanupPromises = []
+      for (const [taskId, task] of downloadTasks) {
+        try {
+          // 取消下载任务
+          if (task.abortController) {
+            task.abortController.abort()
+          }
 
-    // 并行清理所有远程临时文件
-    if (remoteCleanupPromises.length > 0) {
+          // 如果有远程临时文件，添加到清理列表
+          if (task.remoteTarPath) {
+            remoteCleanupPromises.push(cleanupRemoteTarFile(task.remoteTarPath))
+          }
+        } catch (taskError) {
+          consola.warn(`清理下载任务 ${ taskId } 失败:`, taskError.message)
+        }
+      }
+
+      // 并行清理所有远程临时文件
+      if (remoteCleanupPromises.length > 0) {
+        try {
+          await Promise.all(remoteCleanupPromises)
+          consola.info(`连接断开时已清理 ${ remoteCleanupPromises.length } 个远程临时文件`)
+        } catch (err) {
+          consola.warn('连接断开时清理远程临时文件部分失败:', err.message)
+        }
+      }
+
+      // 清理上传任务和相关资源
+      for (const [taskId, task] of uploadTasks) {
+        try {
+          if (task.abortController) {
+            task.abortController.abort()
+          }
+        } catch (taskError) {
+          consola.warn(`清理上传任务 ${ taskId } 失败:`, taskError.message)
+        }
+      }
+
+      // 清理上传缓存中的大文件数据
+      for (const [taskId, cache] of uploadCache) {
+        try {
+          if (cache.chunks) {
+            // 释放分片内存
+            cache.chunks.length = 0
+          }
+        } catch (cacheError) {
+          consola.warn(`清理上传缓存 ${ taskId } 失败:`, cacheError.message)
+        }
+      }
+
+      // 清理所有任务映射
+      downloadTasks.clear()
+      uploadTasks.clear()
+      uploadCache.clear()
+
+      // 清理本地缓存目录
       try {
-        await Promise.all(remoteCleanupPromises)
-        consola.info(`连接断开时已清理 ${ remoteCleanupPromises.length } 个远程临时文件`)
-      } catch (err) {
-        consola.warn('连接断开时清理远程临时文件部分失败:', err.message)
+        cleanupCacheDir()
+      } catch (cleanupError) {
+        consola.warn('清理本地缓存目录失败:', cleanupError.message)
       }
+
+      consola.info('SFTP资源清理完成')
+    } catch (disconnectError) {
+      consola.error('Socket断开连接清理过程中发生错误:', disconnectError.message)
     }
-
-    // 清理上传任务和相关资源
-    for (const [taskId, task] of uploadTasks) {
-      if (task.abortController) {
-        task.abortController.abort()
-      }
-    }
-
-    // 清理上传缓存中的大文件数据
-    for (const [taskId, cache] of uploadCache) {
-      if (cache.chunks) {
-        // 释放分片内存
-        cache.chunks.length = 0
-      }
-    }
-
-    // 清理所有任务映射
-    downloadTasks.clear()
-    uploadTasks.clear()
-    uploadCache.clear()
-
-    // 清理本地缓存目录
-    cleanupCacheDir()
-
-    consola.info('SFTP资源清理完成')
   })
 
   // 定期内存清理（可选优化）
@@ -1225,102 +1340,174 @@ module.exports = (httpServer) => {
     consola.success('sftp-v2 websocket 已连接')
     let jumpSshClients = []
 
+    // 添加socket本身的错误处理
+    socket.on('error', (err) => {
+      consola.error('SFTP-v2 Socket连接错误:', err.message)
+    })
+
     socket.on('ws_sftp', async ({ hostId, token }) => {
-      const { code } = await verifyAuthSync(token, requestIP)
-      if (code !== 1) {
-        socket.emit('token_verify_fail')
-        socket.disconnect()
-        return
-      }
-      const targetHostInfo = await hostListDB.findOneAsync({ _id: hostId })
-      if (!targetHostInfo) throw new Error(`Host with ID ${ hostId } not found`)
-
-      let { connectByJumpHosts = null } = (await decryptAndExecuteAsync(rawPath.join(__dirname, 'plus.js'))) || {}
-      let { authType, host, port, username, jumpHosts } = targetHostInfo
-
-      let { authInfo: targetConnectionOptions } = await getConnectionOptions(hostId)
-      let jumpHostResult = connectByJumpHosts && (await connectByJumpHosts(jumpHosts, targetConnectionOptions.host, targetConnectionOptions.port, socket))
-      if (jumpHostResult) {
-        targetConnectionOptions.sock = jumpHostResult.sock
-        jumpSshClients = jumpHostResult.sshClients
-        consola.success('sftp-v2 跳板机连接成功')
-      }
-
-      consola.info('准备连接sftp-v2 面板：', host)
-      consola.log('连接信息', { username, port, authType })
-
-      sftpClient.client = new SSHClient()
-
-      // 添加错误处理器，防止程序崩溃
-      sftpClient.client.on('error', (err) => {
-        consola.error('SFTP连接shell终端错误：:', err.message)
-        // 发送SSH连接错误事件，而不是WebSocket连接失败事件
-        socket.emit('shell_connection_error', {
-          message: `SFTP连接shell终端错误：: ${ err.message }`,
-          code: err.code || 'UNKNOWN'
-        })
-      })
-
-      sftpClient.client.on('end', () => {
-        consola.info('SSH连接正常结束')
-      })
-
-      sftpClient.client.on('close', (hadError) => {
-        if (hadError) {
-          consola.warn('SSH连接异常关闭')
-        } else {
-          consola.info('SSH连接已关闭')
-        }
-      })
-
-      sftpClient.client.on('keyboard-interactive', function (name, instructions, instructionsLang, prompts, finish) {
-        finish([targetConnectionOptions[authType]])
-      })
-
       try {
-        await sftpClient.connect({
-          tryKeyboard: true,
-          ...targetConnectionOptions
+        const { code } = await verifyAuthSync(token, requestIP)
+        if (code !== 1) {
+          socket.emit('token_verify_fail')
+          socket.disconnect()
+          return
+        }
+        const targetHostInfo = await hostListDB.findOneAsync({ _id: hostId })
+        if (!targetHostInfo) throw new Error(`Host with ID ${ hostId } not found`)
+
+        let { connectByJumpHosts = null } = (await decryptAndExecuteAsync(rawPath.join(__dirname, 'plus.js'))) || {}
+        let { authType, host, port, username, jumpHosts } = targetHostInfo
+
+        let { authInfo: targetConnectionOptions } = await getConnectionOptions(hostId)
+        let jumpHostResult = connectByJumpHosts && (await connectByJumpHosts(jumpHosts, targetConnectionOptions.host, targetConnectionOptions.port, socket))
+        if (jumpHostResult) {
+          targetConnectionOptions.sock = jumpHostResult.sock
+          jumpSshClients = jumpHostResult.sshClients
+          consola.success('sftp-v2 跳板机连接成功')
+        }
+
+        consola.info('准备连接sftp-v2 面板：', host)
+        consola.log('连接信息', { username, port, authType })
+
+        sftpClient.client = new SSHClient()
+
+        // 添加错误处理器，防止程序崩溃
+        sftpClient.client.on('error', (err) => {
+          consola.error('SFTP SSH连接错误:', err.message)
+          try {
+          // 发送SSH连接错误事件
+            socket.emit('shell_connection_error', {
+              message: `SSH连接错误: ${ err.message }`,
+              code: err.code || 'UNKNOWN'
+            })
+          } catch (emitError) {
+            consola.error('发送错误事件失败:', emitError.message)
+          }
         })
-        fs.ensureDirSync(sftpCacheDir)
-        let rootList = []
-        let isRootUser = true
-        let currentWorkingDir = '/'
+
+        sftpClient.client.on('end', () => {
+          consola.info('SSH连接正常结束')
+        })
+
+        sftpClient.client.on('close', (hadError) => {
+          if (hadError) {
+            consola.warn('SSH连接异常关闭')
+            try {
+              socket.emit('shell_connection_error', {
+                message: 'SSH连接异常关闭',
+                code: 'CONNECTION_CLOSED'
+              })
+            } catch (emitError) {
+              consola.error('发送连接关闭事件失败:', emitError.message)
+            }
+          } else {
+            consola.info('SSH连接已关闭')
+          }
+        })
+
+        // 添加未处理异常捕获
+        sftpClient.client.on('timeout', () => {
+          consola.warn('SSH连接超时')
+          try {
+            socket.emit('shell_connection_error', {
+              message: 'SSH连接超时',
+              code: 'CONNECTION_TIMEOUT'
+            })
+          } catch (emitError) {
+            consola.error('发送超时事件失败:', emitError.message)
+          }
+        })
+
+        sftpClient.client.on('keyboard-interactive', function (name, instructions, instructionsLang, prompts, finish) {
+          finish([targetConnectionOptions[authType]])
+        })
 
         try {
-          rootList = await sftpClient.list('/')
-          consola.success('获取根目录成功')
-        } catch (error) {
-          consola.error('获取根目录失败:', error.message)
-          consola.info('尝试获取当前目录')
-          isRootUser = false
+          await sftpClient.connect({
+            tryKeyboard: true,
+            ...targetConnectionOptions
+          })
+          fs.ensureDirSync(sftpCacheDir)
+          let rootList = []
+          let isRootUser = true
+          let currentWorkingDir = '/'
 
           try {
-            // 获取当前工作目录的绝对路径
-            currentWorkingDir = await sftpClient.cwd()
-            consola.info('当前工作目录:', currentWorkingDir)
-            rootList = await sftpClient.list(currentWorkingDir)
-            consola.success('获取当前目录成功')
-          } catch (cwdError) {
-            consola.warn('获取工作目录失败，使用相对路径:', cwdError.message)
-            currentWorkingDir = '~'
-            rootList = await sftpClient.list('./')
-            consola.success('获取当前目录成功')
-          }
-        }
+            rootList = await sftpClient.list('/')
+            consola.success('获取根目录成功')
+          } catch (error) {
+            consola.error('获取根目录失败:', error.message)
+            consola.info('尝试获取当前目录')
+            isRootUser = false
 
-        // 普通文件-、目录文件d、链接文件l
-        socket.emit('connect_success', {
-          rootList,
-          isRootUser,
-          currentPath: currentWorkingDir
-        })
-        consola.success('连接sftp-v2 成功：', host)
-        listenAction(sftpClient, socket, isRootUser)
-      } catch (error) {
-        consola.error('连接sftp-v2 失败：', error.message)
-        socket.emit('connect_fail', error.message)
-        socket.disconnect()
+            try {
+            // 获取当前工作目录的绝对路径
+              currentWorkingDir = await sftpClient.cwd()
+              consola.info('当前工作目录:', currentWorkingDir)
+              rootList = await sftpClient.list(currentWorkingDir)
+              consola.success('获取当前目录成功')
+            } catch (cwdError) {
+              consola.warn('获取工作目录失败，使用相对路径:', cwdError.message)
+              currentWorkingDir = '~'
+              rootList = await sftpClient.list('./')
+              consola.success('获取当前目录成功')
+            }
+          }
+
+          // 普通文件-、目录文件d、链接文件l
+          socket.emit('connect_success', {
+            rootList,
+            isRootUser,
+            currentPath: currentWorkingDir
+          })
+          consola.success('连接sftp-v2 成功：', host)
+          listenAction(sftpClient, socket, isRootUser)
+        } catch (error) {
+          consola.error('连接sftp-v2 失败：', error.message)
+
+          // 发送详细的错误信息给前端
+          let errorMessage = error.message
+          if (error.code) {
+            errorMessage += ` (错误代码: ${ error.code })`
+          }
+          if (error.errno) {
+            errorMessage += ` (错误号: ${ error.errno })`
+          }
+
+          socket.emit('connect_fail', errorMessage)
+
+          // 清理资源
+          try {
+            if (sftpClient && sftpClient.sftp) {
+              await sftpClient.end()
+            }
+          } catch (cleanupError) {
+            consola.warn('清理SFTP客户端资源失败:', cleanupError.message)
+          }
+
+          // 清理跳板机连接
+          if (jumpSshClients && jumpSshClients.length > 0) {
+            jumpSshClients.forEach((client, index) => {
+              try {
+                client.end()
+                consola.info(`已清理跳板机连接 ${ index + 1 }`)
+              } catch (cleanupError) {
+                consola.warn(`清理跳板机连接 ${ index + 1 } 失败:`, cleanupError.message)
+              }
+            })
+          }
+
+          socket.disconnect()
+        }
+      } catch (globalError) {
+        consola.error('SFTP连接处理过程中发生未预期错误:', globalError.message)
+        try {
+          socket.emit('connect_fail', `连接失败: ${ globalError.message }`)
+          socket.disconnect()
+        } catch (cleanupError) {
+          consola.error('清理失败连接时发生错误:', cleanupError.message)
+        }
       }
     })
 

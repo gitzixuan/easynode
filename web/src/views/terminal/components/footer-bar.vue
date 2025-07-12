@@ -10,7 +10,7 @@
           <ScriptInput :host-id="hostId" @exec-command="execCommand" />
         </el-tab-pane>
         <el-tab-pane label="容器管理" name="docker">
-          <Docker :host-id="hostId" />
+          <Docker v-if="activeTab === 'docker'" :host-id="hostId" />
         </el-tab-pane>
       </el-tabs>
     </div>

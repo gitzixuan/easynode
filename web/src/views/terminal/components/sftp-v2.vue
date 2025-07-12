@@ -254,6 +254,16 @@
         @saved="onTextFileSaved"
       />
 
+      <!-- 图片预览 -->
+      <ImagePreview
+        v-model="showImagePreview"
+        :image-src="imagePreviewConfig.imageSrc"
+        :file-name="imagePreviewConfig.fileName"
+        :file-size="imagePreviewConfig.fileSize"
+        :file-path="imagePreviewConfig.filePath"
+        @download="onImageDownload"
+      />
+
       <!-- 下载任务管理对话框 -->
       <el-dialog
         v-model="showDownloadDialog"
@@ -529,6 +539,7 @@ import fileIcon from '@/assets/image/system/file.png'
 import unknowIcon from '@/assets/image/system/unknow.png'
 import { useContextMenu } from '@/composables/useContextMenu'
 import TextEditor from '@/components/text-editor/index.vue'
+import ImagePreview from '@/components/image-preview/index.vue'
 
 const props = defineProps({
   hostId: {
@@ -617,6 +628,15 @@ const textEditorConfig = ref({
   filePath: '',
   fileName: '',
   fileSize: 0
+})
+
+// 图片预览相关状态
+const showImagePreview = ref(false)
+const imagePreviewConfig = ref({
+  imageSrc: '',
+  fileName: '',
+  fileSize: 0,
+  filePath: ''
 })
 
 const hasDownloadTasks = computed(() => downloadTasks.value.size > 0)
@@ -855,8 +875,16 @@ const connectSftp = () => {
         // 软链接指向文件，尝试打开文件
         const fileName = realPath.split('/').pop()
 
-        // 检查是否为文本文件
-        if (isTextFile(fileName)) {
+        // 检查是否为图片文件
+        if (isImageFile(fileName)) {
+          // 使用socket请求图片数据
+          loading.value = true
+          socket.value.emit('read_image', {
+            filePath: realPath,
+            fileSize: 0 // 软链接文件大小需要从服务端获取
+          })
+        } else if (isTextFile(fileName)) {
+          // 检查是否为文本文件
           textEditorConfig.value = {
             filePath: realPath,
             fileName: fileName,
@@ -864,7 +892,7 @@ const connectSftp = () => {
           }
           showTextEditor.value = true
         } else {
-          $message.info(`软链接指向文件: ${ realPath }，暂不支持在线编辑`)
+          $message.info(`软链接指向文件: ${ realPath }，暂不支持在线预览`)
         }
       }
     })
@@ -1005,6 +1033,35 @@ const connectSftp = () => {
       console.error('SFTP连接shell终端错误：', message, 'Code:', code)
       connectionStatus.value = 'failed'
       connectionError.value = message
+      loading.value = false
+    })
+
+    // 图片预览相关事件
+    socket.value.on('image_content', ({ imageUrl, filePath, fileName, fileSize }) => {
+      console.log('收到图片URL:', { filePath, fileName, fileSize, imageUrl })
+
+      if (!imageUrl) {
+        $message.error('图片URL为空')
+        loading.value = false
+        return
+      }
+
+      // 更新图片预览配置
+      imagePreviewConfig.value = {
+        imageSrc: imageUrl,
+        fileName: fileName || filePath.split('/').pop(),
+        fileSize,
+        filePath
+      }
+
+      // 显示图片预览
+      showImagePreview.value = true
+      loading.value = false
+    })
+
+    socket.value.on('image_read_error', ({ error, filePath }) => {
+      console.error('图片读取错误:', error, filePath)
+      $message.error(`图片预览失败: ${ error }`)
       loading.value = false
     })
   })
@@ -1282,6 +1339,19 @@ const isArchiveFile = (filename) => {
   return /(\.zip|\.tar\.gz|\.tgz|\.tar|\.rar)$/i.test(filename)
 }
 
+// 判断是否为图片文件
+const isImageFile = (filename) => {
+  const imageExtensions = [
+    'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'ico', 'tiff', 'tif',
+  ]
+
+  // 获取文件扩展名
+  const ext = filename.split('.').pop()?.toLowerCase()
+
+  // 检查是否在图片扩展名列表中
+  return ext && imageExtensions.includes(ext)
+}
+
 // 判断是否为文本文件
 const isTextFile = (filename) => {
   const textExtensions = [
@@ -1312,6 +1382,38 @@ const isTextFile = (filename) => {
 
 // 处理文件打开
 const handleFileOpen = (row) => {
+  // 检查是否为图片文件
+  if (isImageFile(row.name)) {
+    // 检查图片文件大小限制（10MB）
+    const maxImageSize = 10 * 1024 * 1024 // 10MB
+    if (row.size > maxImageSize) {
+      $message.warning(`图片过大（${ sizeFormatter(row, null, row.size) }），仅支持预览小于10MB的图片`)
+      return
+    }
+
+    // 打开图片预览
+    let fullPath
+    const currentPathValue = currentPath.value
+
+    if (currentPathValue === '/' || currentPathValue === '~') {
+      fullPath = `${ currentPathValue === '/' ? '' : currentPathValue }/${ row.name }`
+    } else {
+      fullPath = `${ currentPathValue }/${ row.name }`
+    }
+
+    // 清理路径
+    fullPath = fullPath.replace(/\/+/g, '/')
+
+    // 使用socket请求图片数据
+    loading.value = true
+    socket.value.emit('read_image', {
+      filePath: fullPath,
+      fileSize: row.size
+    })
+
+    return
+  }
+
   // 检查文件大小限制（1MB）
   const maxFileSize = 1024 * 1024 // 1MB
   if (row.size > maxFileSize) {
@@ -1343,7 +1445,7 @@ const handleFileOpen = (row) => {
     showTextEditor.value = true
   } else {
     // 非文本文件，暂时提示
-    $message.info(`文件 "${ row.name }" 不是文本文件，暂不支持在线编辑`)
+    $message.info(`文件 "${ row.name }" 暂不支持在线预览`)
   }
 }
 
@@ -1755,18 +1857,16 @@ const navigateToFavorite = (favorite) => {
     // 导航到文件夹
     switchToPath(favorite.path, true)
   } else {
-    // 文件：检查是否为文本文件，如果是则直接打开编辑器
-    if (isTextFile(favorite.name)) {
-      // 先导航到文件所在目录，然后打开文本编辑器
-      const dirPath = favorite.path.substring(0, favorite.path.lastIndexOf('/')) || '/'
-
-      // 模拟文件对象来复用handleFileOpen逻辑
-      const fileRow = {
-        name: favorite.name,
-        size: 0, // 收藏中没有保存大小信息，先设为0，后续在编辑器中会检查
-        type: '-'
-      }
-
+    // 文件：检查文件类型
+    if (isImageFile(favorite.name)) {
+      // 图片文件：直接打开预览
+      loading.value = true
+      socket.value.emit('read_image', {
+        filePath: favorite.path,
+        fileSize: 0 // 收藏中没有保存大小信息，从服务端获取
+      })
+    } else if (isTextFile(favorite.name)) {
+      // 文本文件：直接打开编辑器
       textEditorConfig.value = {
         filePath: favorite.path,
         fileName: favorite.name,
@@ -1774,10 +1874,11 @@ const navigateToFavorite = (favorite) => {
       }
 
       // 先切换到文件所在目录，然后打开编辑器
+      const dirPath = favorite.path.substring(0, favorite.path.lastIndexOf('/')) || '/'
       switchToPath(dirPath, true)
       showTextEditor.value = true
     } else {
-      // 非文本文件：导航到文件所在目录
+      // 其他文件：导航到文件所在目录
       const dirPath = favorite.path.substring(0, favorite.path.lastIndexOf('/')) || '/'
       switchToPath(dirPath, true)
     }
@@ -1788,6 +1889,21 @@ const navigateToFavorite = (favorite) => {
 const onTextFileSaved = () => {
   refresh()
   showTextEditor.value = false
+}
+
+// 图片下载处理
+const onImageDownload = (imageData) => {
+  // 直接下载图片文件
+  const { fileName, filePath } = imageData
+  const targets = [{ name: fileName, type: '-' },]
+
+  loading.value = true
+  const currentPathValue = filePath.substring(0, filePath.lastIndexOf('/')) || '/'
+
+  socket.value.emit('download_request', {
+    dirPath: currentPathValue,
+    targets
+  })
 }
 
 // 上传相关功能
