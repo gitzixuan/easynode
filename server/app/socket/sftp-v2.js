@@ -17,6 +17,10 @@ const listenAction = (sftpClient, socket, isRootUser) => {
   // 下载任务管理
   const downloadTasks = new Map() // taskId -> { abortController, startTime, totalSize, downloadedSize }
 
+  // 上传任务管理
+  const uploadTasks = new Map() // taskId -> { abortController, startTime, totalSize, uploadedSize, chunks }
+  const uploadCache = new Map() // taskId -> { chunks: [], totalChunks: 0 }
+
   socket.on('open_dir', async (path) => {
     try {
       const dirLs = await sftpClient.list(path)
@@ -136,15 +140,37 @@ const listenAction = (sftpClient, socket, isRootUser) => {
 
         let errMsg = ''
         let isResolved = false
+        let timeout = null
+
+        // 清理函数
+        const cleanup = () => {
+          if (timeout) {
+            clearTimeout(timeout)
+            timeout = null
+          }
+          if (stream) {
+            stream.removeAllListeners()
+          }
+        }
+
+        // 统一的结果处理函数
+        const resolveOnce = (result, isError = false) => {
+          if (isResolved) return
+          isResolved = true
+          cleanup()
+
+          if (isError) {
+            rej(result)
+          } else {
+            res(result)
+          }
+        }
 
         // 设置超时保护（30秒）
-        const timeout = setTimeout(() => {
-          if (!isResolved) {
-            isResolved = true
-            consola.warn('命令执行超时:', cmd)
-            rej(new Error(`命令执行超时: ${ cmd }`))
-          }
-        }, 30000)
+        timeout = setTimeout(() => {
+          consola.warn('命令执行超时:', cmd)
+          resolveOnce(new Error(`命令执行超时: ${ cmd }`), true)
+        }, 60000)
 
         // 处理错误输出
         stream.stderr.on('data', d => {
@@ -153,37 +179,27 @@ const listenAction = (sftpClient, socket, isRootUser) => {
 
         // 处理错误事件
         stream.on('error', (streamErr) => {
-          if (!isResolved) {
-            isResolved = true
-            clearTimeout(timeout)
-            consola.error('Stream错误:', cmd, streamErr.message)
-            rej(streamErr)
-          }
+          consola.error('Stream错误:', cmd, streamErr.message)
+          resolveOnce(streamErr, true)
         })
 
         // 处理连接断开
         stream.on('close', (hadError) => {
-          if (!isResolved && hadError) {
-            isResolved = true
-            clearTimeout(timeout)
+          if (hadError) {
             consola.error('Stream意外关闭:', cmd)
-            rej(new Error('连接意外断开'))
+            resolveOnce(new Error('连接意外断开'), true)
           }
         })
 
         // 处理命令退出
         stream.on('exit', (code) => {
-          if (!isResolved) {
-            isResolved = true
-            clearTimeout(timeout)
-            if (code === 0) {
-              consola.info('命令执行成功:', cmd)
-              res() // 成功
-            } else {
-              const errorMessage = errMsg || `命令退出码: ${ code }`
-              consola.error('命令执行失败:', cmd, errorMessage)
-              rej(new Error(errorMessage))
-            }
+          if (code === 0) {
+            consola.info('命令执行成功:', cmd)
+            resolveOnce() // 成功
+          } else {
+            const errorMessage = errMsg || `命令退出码: ${ code }`
+            consola.error('命令执行失败:', cmd, errorMessage)
+            resolveOnce(new Error(errorMessage), true)
           }
         })
 
@@ -738,13 +754,275 @@ const listenAction = (sftpClient, socket, isRootUser) => {
     }
   })
 
+  // -------- 上传相关功能 --------
+
+  // 开始上传
+  socket.on('upload_start', async ({ taskId, fileName, fileSize, targetPath }) => {
+    try {
+      if (!taskId || !fileName || !fileSize || !targetPath) {
+        throw new Error('上传参数不完整')
+      }
+
+      // 创建上传任务
+      const uploadTask = {
+        taskId,
+        fileName,
+        fileSize,
+        targetPath,
+        uploadedSize: 0,
+        chunks: [],
+        totalChunks: 0,
+        startTime: Date.now(),
+        lastProgressTime: Date.now(),
+        abortController: new AbortController()
+      }
+
+      uploadTasks.set(taskId, uploadTask)
+      uploadCache.set(taskId, { chunks: [], totalChunks: 0 })
+
+      consola.info(`开始上传任务: ${ taskId } - ${ fileName }`)
+      socket.emit('upload_started', { taskId, fileName })
+
+    } catch (err) {
+      consola.error('开始上传失败:', err.message)
+      socket.emit('upload_fail', { taskId, error: err.message })
+    }
+  })
+
+  // 上传文件分片
+  socket.on('upload_chunk', async ({ taskId, chunkIndex, chunkData, totalChunks, isLastChunk }) => {
+    try {
+      const task = uploadTasks.get(taskId)
+      const cache = uploadCache.get(taskId)
+
+      if (!task || !cache) {
+        throw new Error('上传任务不存在')
+      }
+
+      if (task.abortController.signal.aborted) {
+        throw new Error('上传已取消')
+      }
+
+      // 存储分片数据
+      cache.chunks[chunkIndex] = chunkData
+      cache.totalChunks = totalChunks
+
+      // 更新上传进度
+      const uploadedChunks = cache.chunks.filter(chunk => chunk !== undefined).length
+      task.uploadedSize = (uploadedChunks / totalChunks) * task.fileSize
+
+      // 计算速度和ETA
+      const now = Date.now()
+      const elapsed = (now - task.lastProgressTime) / 1000
+      if (elapsed >= 1) { // 每秒更新一次进度
+        const chunkProgress = Math.min((uploadedChunks / totalChunks) * 100, 100)
+        const totalElapsed = (now - task.startTime) / 1000
+        const speed = totalElapsed > 0 ? task.uploadedSize / totalElapsed : 0
+        const eta = speed > 0 ? (task.fileSize - task.uploadedSize) / speed : 0
+
+        socket.emit('upload_progress', {
+          taskId,
+          chunkProgress,
+          chunkUploadedSize: task.uploadedSize,
+          chunkTotalSize: task.fileSize,
+          sftpProgress: 0,
+          sftpUploadedSize: 0,
+          sftpTotalSize: task.fileSize,
+          speed: Math.round(speed),
+          eta: Math.round(eta),
+          stage: 'uploading'
+        })
+
+        task.lastProgressTime = now
+      }
+
+      consola.info(`上传分片: ${ taskId } - ${ chunkIndex + 1 }/${ totalChunks }`)
+      socket.emit('upload_chunk_success', { taskId, chunkIndex })
+
+      // 如果是最后一个分片，开始合并和传输
+      if (isLastChunk && uploadedChunks === totalChunks) {
+        await completeUpload(task, cache)
+      }
+
+    } catch (err) {
+      consola.error('上传分片失败:', err.message)
+      socket.emit('upload_chunk_fail', { taskId, chunkIndex, error: err.message })
+    }
+  })
+
+  // 完成上传的辅助函数
+  async function completeUpload(task, cache) {
+    let tempFilePath = null
+
+    try {
+      consola.info(`开始合并文件: ${ task.fileName }`)
+
+      // 发送合并开始事件
+      socket.emit('upload_progress', {
+        taskId: task.taskId,
+        chunkProgress: 100,
+        chunkUploadedSize: task.fileSize,
+        chunkTotalSize: task.fileSize,
+        sftpProgress: 0,
+        sftpUploadedSize: 0,
+        sftpTotalSize: task.fileSize,
+        speed: 0,
+        eta: 0,
+        stage: 'merging'
+      })
+
+      // 创建临时文件用于SFTP传输
+      tempFilePath = rawPath.join(sftpCacheDir, `temp_${ task.taskId }_${ task.fileName }`)
+      const writeStream = fs.createWriteStream(tempFilePath)
+
+      // 流式合并分片，避免大文件占用过多内存
+      try {
+        for (let i = 0; i < cache.totalChunks; i++) {
+          if (!cache.chunks[i]) {
+            throw new Error(`分片 ${ i } 缺失`)
+          }
+
+          const chunkBuffer = Buffer.from(cache.chunks[i])
+          await new Promise((resolve, reject) => {
+            writeStream.write(chunkBuffer, (err) => {
+              if (err) reject(err)
+              else resolve()
+            })
+          })
+
+          // 立即释放已写入的分片内存
+          cache.chunks[i] = null
+        }
+
+        await new Promise((resolve, reject) => {
+          writeStream.end((err) => {
+            if (err) reject(err)
+            else resolve()
+          })
+        })
+      } catch (mergeErr) {
+        writeStream.destroy()
+        throw mergeErr
+      }
+
+      // 验证文件大小
+      const stats = fs.statSync(tempFilePath)
+      if (stats.size !== task.fileSize) {
+        throw new Error(`文件大小不匹配: 期望 ${ task.fileSize }, 实际 ${ stats.size }`)
+      }
+
+      // 发送SFTP传输开始事件
+      socket.emit('upload_progress', {
+        taskId: task.taskId,
+        chunkProgress: 100,
+        chunkUploadedSize: task.fileSize,
+        chunkTotalSize: task.fileSize,
+        sftpProgress: 0,
+        sftpUploadedSize: 0,
+        sftpTotalSize: task.fileSize,
+        speed: 0,
+        eta: 0,
+        stage: 'transferring'
+      })
+
+      // 通过SFTP传输到远程服务器，使用fastPut带进度回调
+      consola.info(`开始传输文件到远程服务器: ${ task.targetPath }`)
+
+      let sftpStartTime = Date.now()
+      let lastSftpUpdateTime = sftpStartTime
+      let lastSftpUploadedSize = 0
+
+      await sftpClient.fastPut(tempFilePath, task.targetPath, {
+        step: (transferredBytes) => {
+          const now = Date.now()
+          const sftpProgress = Math.min((transferredBytes / task.fileSize) * 100, 100)
+
+          // 计算SFTP传输速度和ETA（每500ms更新一次）
+          if (now - lastSftpUpdateTime >= 500) {
+            const elapsed = (now - lastSftpUpdateTime) / 1000
+            const sizeDiff = transferredBytes - lastSftpUploadedSize
+            const sftpSpeed = elapsed > 0 ? sizeDiff / elapsed : 0
+            const remainingBytes = task.fileSize - transferredBytes
+            const sftpEta = sftpSpeed > 0 ? remainingBytes / sftpSpeed : 0
+
+            socket.emit('upload_progress', {
+              taskId: task.taskId,
+              chunkProgress: 100,
+              chunkUploadedSize: task.fileSize,
+              chunkTotalSize: task.fileSize,
+              sftpProgress,
+              sftpUploadedSize: transferredBytes,
+              sftpTotalSize: task.fileSize,
+              speed: Math.round(sftpSpeed),
+              eta: Math.round(sftpEta),
+              stage: 'transferring'
+            })
+
+            lastSftpUpdateTime = now
+            lastSftpUploadedSize = transferredBytes
+          }
+        }
+      })
+
+      // 传输完成
+      consola.info(`文件上传成功: ${ task.fileName }`)
+      socket.emit('upload_complete', {
+        taskId: task.taskId,
+        fileName: task.fileName,
+        targetPath: task.targetPath
+      })
+
+    } catch (err) {
+      consola.error('完成上传失败:', err.message)
+      socket.emit('upload_fail', {
+        taskId: task.taskId,
+        error: err.message
+      })
+    } finally {
+      // 确保清理临时文件
+      if (tempFilePath) {
+        try {
+          fs.unlinkSync(tempFilePath)
+        } catch (cleanupErr) {
+          consola.warn('清理临时文件失败:', cleanupErr.message)
+        }
+      }
+
+      // 清理任务和缓存
+      uploadTasks.delete(task.taskId)
+      uploadCache.delete(task.taskId)
+    }
+  }
+
+  // 取消上传
+  socket.on('upload_cancel', ({ taskId }) => {
+    const task = uploadTasks.get(taskId)
+    if (task) {
+      task.abortController.abort()
+      uploadTasks.delete(taskId)
+      uploadCache.delete(taskId)
+
+      consola.info(`取消上传任务: ${ taskId }`)
+      socket.emit('upload_cancelled', { taskId })
+    }
+  })
+
   // 监听连接断开，清理下载任务和缓存
   socket.on('disconnect', async () => {
+    consola.info('SFTP连接断开，开始清理资源...')
+
+    // 清理定时器
+    if (memoryCleanupInterval) {
+      clearInterval(memoryCleanupInterval)
+    }
+
     // 清理所有远程临时文件
     const remoteCleanupPromises = []
     for (const [taskId, task] of downloadTasks) {
       // 取消下载任务
-      task.abortController.abort()
+      if (task.abortController) {
+        task.abortController.abort()
+      }
 
       // 如果有远程临时文件，添加到清理列表
       if (task.remoteTarPath) {
@@ -762,11 +1040,60 @@ const listenAction = (sftpClient, socket, isRootUser) => {
       }
     }
 
+    // 清理上传任务和相关资源
+    for (const [taskId, task] of uploadTasks) {
+      if (task.abortController) {
+        task.abortController.abort()
+      }
+    }
+
+    // 清理上传缓存中的大文件数据
+    for (const [taskId, cache] of uploadCache) {
+      if (cache.chunks) {
+        // 释放分片内存
+        cache.chunks.length = 0
+      }
+    }
+
+    // 清理所有任务映射
     downloadTasks.clear()
+    uploadTasks.clear()
+    uploadCache.clear()
 
     // 清理本地缓存目录
     cleanupCacheDir()
+
+    consola.info('SFTP资源清理完成')
   })
+
+  // 定期内存清理（可选优化）
+  const memoryCleanupInterval = setInterval(() => {
+    // 检查并清理超时的上传任务（超过1小时）
+    const now = Date.now()
+    const timeout = 2 * 60 * 60 * 1000 // 2小时
+
+    for (const [taskId, task] of uploadTasks) {
+      if (now - task.startTime > timeout) {
+        consola.warn(`清理超时上传任务: ${ taskId }`)
+        if (task.abortController) {
+          task.abortController.abort()
+        }
+        uploadTasks.delete(taskId)
+        uploadCache.delete(taskId)
+      }
+    }
+
+    // 检查并清理超时的下载任务
+    for (const [taskId, task] of downloadTasks) {
+      if (now - task.startTime > timeout) {
+        consola.warn(`清理超时下载任务: ${ taskId }`)
+        if (task.abortController) {
+          task.abortController.abort()
+        }
+        downloadTasks.delete(taskId)
+      }
+    }
+  }, 5 * 60 * 1000) // 每5分钟检查一次
 
   // 带进度的文件下载函数
   async function downloadFileWithProgress(sftpClient, remotePath, localPath, taskId, downloadTasks, socket, abortController) {
@@ -778,17 +1105,45 @@ const listenAction = (sftpClient, socket, isRootUser) => {
 
       let lastUpdateTime = Date.now()
       let lastDownloadedSize = 0
+      let progressInterval = null
+      let readStream = null
+      let writeStream = null
 
-      const progressInterval = setInterval(() => {
-        if (abortController.signal.aborted) {
+      // 清理函数
+      const cleanup = () => {
+        if (progressInterval) {
           clearInterval(progressInterval)
+          progressInterval = null
+        }
+        if (readStream) {
+          readStream.destroy()
+          readStream = null
+        }
+        if (writeStream) {
+          writeStream.destroy()
+          writeStream = null
+        }
+      }
+
+      // 错误处理函数
+      const handleError = (err) => {
+        cleanup()
+        fs.unlink(localPath).catch(() => {})
+        reject(err)
+      }
+
+      progressInterval = setInterval(() => {
+        if (abortController.signal.aborted) {
+          cleanup()
+          reject(new Error('下载已取消'))
           return
         }
 
         const now = Date.now()
         const currentTask = downloadTasks.get(taskId)
         if (!currentTask) {
-          clearInterval(progressInterval)
+          cleanup()
+          reject(new Error('任务已被删除'))
           return
         }
 
@@ -818,45 +1173,36 @@ const listenAction = (sftpClient, socket, isRootUser) => {
         lastDownloadedSize = downloadedSize
       }, 1000) // 每1秒更新
 
-      const readStream = sftpClient.createReadStream(remotePath)
-      const writeStream = fs.createWriteStream(localPath)
+      try {
+        readStream = sftpClient.createReadStream(remotePath)
+        writeStream = fs.createWriteStream(localPath)
 
-      readStream.on('data', (chunk) => {
-        if (abortController.signal.aborted) {
-          readStream.destroy()
-          writeStream.destroy()
-          fs.unlink(localPath).catch(() => {}) // 删除部分下载的文件
-          clearInterval(progressInterval)
-          reject(new Error('下载已取消'))
-          return
-        }
+        readStream.on('data', (chunk) => {
+          if (abortController.signal.aborted) {
+            cleanup()
+            fs.unlink(localPath).catch(() => {}) // 删除部分下载的文件
+            reject(new Error('下载已取消'))
+            return
+          }
 
-        const currentTask = downloadTasks.get(taskId)
-        if (currentTask) {
-          currentTask.downloadedSize += chunk.length
-        }
-      })
+          const currentTask = downloadTasks.get(taskId)
+          if (currentTask) {
+            currentTask.downloadedSize += chunk.length
+          }
+        })
 
-      readStream.on('error', (err) => {
-        clearInterval(progressInterval)
-        writeStream.destroy()
-        fs.unlink(localPath).catch(() => {})
-        reject(err)
-      })
+        readStream.on('error', handleError)
+        writeStream.on('error', handleError)
 
-      writeStream.on('error', (err) => {
-        clearInterval(progressInterval)
-        readStream.destroy()
-        fs.unlink(localPath).catch(() => {})
-        reject(err)
-      })
+        writeStream.on('finish', () => {
+          cleanup()
+          resolve()
+        })
 
-      writeStream.on('finish', () => {
-        clearInterval(progressInterval)
-        resolve()
-      })
-
-      readStream.pipe(writeStream)
+        readStream.pipe(writeStream)
+      } catch (err) {
+        handleError(err)
+      }
     })
   }
 }
@@ -936,7 +1282,6 @@ module.exports = (httpServer) => {
           tryKeyboard: true,
           ...targetConnectionOptions
         })
-        consola.success('连接sftp-v2 成功：', host)
         fs.ensureDirSync(sftpCacheDir)
         let rootList = []
         let isRootUser = true

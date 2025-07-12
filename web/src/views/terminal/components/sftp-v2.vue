@@ -126,6 +126,14 @@
         >
           <Download />
         </el-icon>
+        <el-icon
+          v-if="hasUploadTasks"
+          class="action_icon upload_icon"
+          :title="`上传管理 - 正在上传 ${activeUploadTasks.length} 个任务`"
+          @click="showUploadManager"
+        >
+          <Upload />
+        </el-icon>
       </div>
 
       <!-- 文件列表 -->
@@ -150,7 +158,7 @@
           show-overflow-tooltip
         >
           <template #default="{ row }">
-            <div class="file_name_cell" @mouseenter="row._showStar = true" @mouseleave="row._showStar = false">
+            <div class="file_name_cell">
               <img :src="getIcon(row.type)" class="file_icon">
               <template v-if="isEditing(row)">
                 <el-input
@@ -166,8 +174,8 @@
               <template v-else>
                 <span class="file_name" v-text="row.name" />
                 <el-icon
-                  v-if="row._showStar"
                   class="star_icon"
+                  :class="{ 'favorited': isFavorited(row) }"
                   :title="isFavorited(row) ? '取消收藏' : '收藏'"
                   @click.stop="toggleFavorite(row)"
                 >
@@ -217,6 +225,22 @@
         </template>
       </el-popover>
 
+      <!-- 隐藏的文件选择器 -->
+      <input
+        ref="uploadInputRef"
+        type="file"
+        multiple
+        style="display: none"
+        @change="handleFileSelect"
+      >
+      <input
+        ref="uploadDirInputRef"
+        type="file"
+        webkitdirectory
+        style="display: none"
+        @change="handleDirSelect"
+      >
+
       <!-- 文本编辑器 -->
       <TextEditor
         v-model="showTextEditor"
@@ -252,7 +276,7 @@
                 <div class="task_header">
                   <div class="file_info">
                     <el-icon class="file_icon"><Download /></el-icon>
-                    <span class="file_name">{{ task.fileName }}</span>
+                    <span class="file_name" :title="task.fileName">{{ task.fileName }}</span>
                   </div>
                   <el-button
                     size="small"
@@ -296,7 +320,7 @@
                 <div class="task_header">
                   <div class="file_info">
                     <el-icon class="file_icon success"><Check /></el-icon>
-                    <span class="file_name">{{ task.fileName }}</span>
+                    <span class="file_name" :title="task.fileName">{{ task.fileName }}</span>
                   </div>
                   <div class="task_actions">
                     <el-button
@@ -323,13 +347,178 @@
           <el-button @click="showDownloadDialog = false">关闭</el-button>
         </template>
       </el-dialog>
+
+      <!-- 上传任务管理对话框 -->
+      <el-dialog
+        v-model="showUploadDialog"
+        title="上传管理"
+        width="600px"
+        :close-on-click-modal="true"
+      >
+        <div class="upload_manager_container">
+          <!-- 正在上传的任务 -->
+          <div v-if="activeUploadTasks.length > 0" class="upload_section">
+            <h4 class="section_title">正在上传 ({{ activeUploadTasks.length }})</h4>
+            <div class="upload_task_list">
+              <div
+                v-for="task in activeUploadTasks"
+                :key="task.taskId"
+                class="upload_task_item"
+              >
+                <div class="task_header">
+                  <div class="file_info">
+                    <el-icon class="file_icon"><Upload /></el-icon>
+                    <span class="file_name" :title="task.fileName">{{ task.fileName }}</span>
+                  </div>
+                  <el-button
+                    size="small"
+                    type="danger"
+                    @click="cancelUpload(task.taskId)"
+                  >
+                    取消
+                  </el-button>
+                </div>
+
+                <div class="progress_info">
+                  <!-- 分片上传进度条 -->
+                  <div class="progress_section">
+                    <div class="progress_label">
+                      上传到面板: {{ formatSize(task.chunkUploadedSize) }} / {{ formatSize(task.chunkTotalSize) }}
+                      ({{ task.chunkProgress.toFixed(1) }}%)
+                    </div>
+                    <el-progress
+                      :percentage="task.chunkProgress"
+                      :show-text="false"
+                      :stroke-width="4"
+                      status="success"
+                    />
+                  </div>
+
+                  <!-- SFTP传输进度条 -->
+                  <div class="progress_section">
+                    <div class="progress_label">
+                      <template v-if="task.stage === 'merging'">
+                        合并文件中...
+                      </template>
+                      <template v-else-if="task.stage === 'transferring'">
+                        传输到服务器: {{ formatSize(task.sftpUploadedSize) }} / {{ formatSize(task.sftpTotalSize) }}
+                        ({{ task.sftpProgress.toFixed(1) }}%)
+                      </template>
+                      <template v-else>
+                        传输到服务器: 0 B / {{ formatSize(task.sftpTotalSize) }} (0.0%)
+                      </template>
+                    </div>
+                    <el-progress
+                      :percentage="task.sftpProgress"
+                      :show-text="false"
+                      :stroke-width="4"
+                      :status="task.stage === 'merging' ? 'warning' : ''"
+                    />
+                  </div>
+
+                  <!-- 速度和时间信息 -->
+                  <div class="progress_details">
+                    <span class="progress_text">
+                      总进度: {{ task.progress.toFixed(1) }}%
+                    </span>
+                    <span class="speed_text">
+                      <template v-if="task.stage === 'merging'">
+                        合并中...
+                      </template>
+                      <template v-else-if="task.stage === 'transferring' && task.speed > 0">
+                        {{ formatSpeed(task.speed) }} · {{ formatTime(task.eta) }}
+                      </template>
+                      <template v-else-if="task.speed > 0">
+                        {{ formatSpeed(task.speed) }} · {{ formatTime(task.eta) }}
+                      </template>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 已完成的任务 -->
+          <div v-if="completedUploadTasks.length > 0" class="upload_section">
+            <h4 class="section_title">已完成 ({{ completedUploadTasks.length }})</h4>
+            <div class="upload_task_list">
+              <div
+                v-for="task in completedUploadTasks"
+                :key="task.taskId"
+                class="upload_task_item completed"
+              >
+                <div class="task_header">
+                  <div class="file_info">
+                    <el-icon class="file_icon success"><Check /></el-icon>
+                    <span class="file_name" :title="task.fileName">{{ task.fileName }}</span>
+                  </div>
+                  <div class="task_actions">
+                    <span class="completed_text">上传完成</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 失败的任务 -->
+          <div v-if="failedUploadTasks.length > 0" class="upload_section">
+            <h4 class="section_title">上传失败 ({{ failedUploadTasks.length }})</h4>
+            <div class="upload_task_list">
+              <div
+                v-for="task in failedUploadTasks"
+                :key="task.taskId"
+                class="upload_task_item failed"
+              >
+                <div class="task_header">
+                  <div class="file_info">
+                    <el-icon class="file_icon error"><WarningFilled /></el-icon>
+                    <span class="file_name" :title="task.fileName">{{ task.fileName }}</span>
+                  </div>
+                  <div class="task_actions">
+                    <el-button
+                      size="small"
+                      type="primary"
+                      @click="retryUpload(task)"
+                    >
+                      重试
+                    </el-button>
+                    <el-button
+                      size="small"
+                      type="danger"
+                      @click="removeUploadTask(task.taskId)"
+                    >
+                      删除
+                    </el-button>
+                  </div>
+                </div>
+                <div class="error_info">
+                  <span class="error_text">错误: {{ task.error }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 无任务时的提示 -->
+          <div v-if="!hasUploadTasks" class="no_tasks">
+            <el-icon class="empty_icon"><Upload /></el-icon>
+            <p>暂无上传任务</p>
+          </div>
+        </div>
+
+        <template #footer>
+          <div class="upload_dialog_footer">
+            <el-button @click="clearCompletedTasks">清空已完成</el-button>
+            <el-button @click="showUploadDialog = false">关闭</el-button>
+          </div>
+        </template>
+      </el-dialog>
     </template>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, getCurrentInstance, nextTick } from 'vue'
-import { ArrowDown, ArrowLeft, Refresh, View, Hide, Edit, ArrowRight, HomeFilled, Check, Close as CloseIcon, Download, DocumentCopy, Loading, WarningFilled, Star, StarFilled, Delete } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, Refresh, View, Hide, Edit, ArrowRight, HomeFilled, Check, Close as CloseIcon, Download, Upload, DocumentCopy, Loading, WarningFilled, Star, StarFilled, Delete } from '@element-plus/icons-vue'
 import socketIo from 'socket.io-client'
 import dirIcon from '@/assets/image/system/dir.png'
 import linkIcon from '@/assets/image/system/link.png'
@@ -406,6 +595,12 @@ const { showMenu } = useContextMenu()
 const showDownloadDialog = ref(false)
 const downloadTasks = ref(new Map()) // taskId -> 下载任务信息
 
+// 上传相关状态
+const showUploadDialog = ref(false)
+const uploadTasks = ref(new Map()) // taskId -> 上传任务信息
+const uploadInputRef = ref(null) // 文件选择器引用
+const uploadDirInputRef = ref(null) // 文件夹选择器引用
+
 // 收藏相关状态
 const favoriteList = ref([]) // 收藏列表
 
@@ -427,6 +622,24 @@ const activeDownloadTasks = computed(() => {
 // 计算属性：已完成的下载任务列表
 const completedDownloadTasks = computed(() => {
   return Array.from(downloadTasks.value.values()).filter(task => task.status === 'completed')
+})
+
+// 上传任务相关计算属性
+const hasUploadTasks = computed(() => uploadTasks.value.size > 0)
+
+// 计算属性：正在进行的上传任务列表
+const activeUploadTasks = computed(() => {
+  return Array.from(uploadTasks.value.values()).filter(task => task.status === 'uploading')
+})
+
+// 计算属性：已完成的上传任务列表
+const completedUploadTasks = computed(() => {
+  return Array.from(uploadTasks.value.values()).filter(task => task.status === 'completed')
+})
+
+// 计算属性：失败的上传任务列表
+const failedUploadTasks = computed(() => {
+  return Array.from(uploadTasks.value.values()).filter(task => task.status === 'failed')
 })
 
 // 计算属性：是否有收藏
@@ -688,6 +901,76 @@ const connectSftp = () => {
       downloadTasks.value.delete(taskId)
     })
 
+    // 上传相关事件
+    socket.value.on('upload_started', ({ taskId, fileName }) => {
+      const task = uploadTasks.value.get(taskId)
+      if (task) {
+        task.status = 'uploading'
+        showUploadDialog.value = true
+        $message.success(`开始上传: ${ fileName }`)
+      }
+    })
+
+    socket.value.on('upload_progress', ({ taskId, chunkProgress, chunkUploadedSize, chunkTotalSize, sftpProgress, sftpUploadedSize, sftpTotalSize, speed, eta, stage }) => {
+      const task = uploadTasks.value.get(taskId)
+      if (task) {
+        // 分片上传进度
+        task.chunkProgress = chunkProgress || 0
+        task.chunkUploadedSize = chunkUploadedSize || 0
+        task.chunkTotalSize = chunkTotalSize || task.totalSize
+
+        // SFTP传输进度
+        task.sftpProgress = sftpProgress || 0
+        task.sftpUploadedSize = sftpUploadedSize || 0
+        task.sftpTotalSize = sftpTotalSize || task.totalSize
+
+        // 其他信息
+        task.speed = speed || 0
+        task.eta = eta || 0
+        task.stage = stage || 'uploading'
+
+        // 计算总体进度（分片上传50% + SFTP传输50%）
+        task.progress = (task.chunkProgress * 0.5) + (task.sftpProgress * 0.5)
+      }
+    })
+
+    socket.value.on('upload_complete', ({ taskId, fileName, targetPath }) => {
+      const task = uploadTasks.value.get(taskId)
+      if (task) {
+        task.status = 'completed'
+        task.progress = 100
+        $message.success(`上传完成: ${ fileName }`)
+        // 刷新文件列表
+        refresh()
+      }
+    })
+
+    socket.value.on('upload_fail', ({ taskId, error }) => {
+      const task = uploadTasks.value.get(taskId)
+      if (task) {
+        task.status = 'failed'
+        task.error = error
+        $message.error(`上传失败: ${ error }`)
+      }
+    })
+
+    socket.value.on('upload_cancelled', ({ taskId }) => {
+      uploadTasks.value.delete(taskId)
+    })
+
+    socket.value.on('upload_chunk_success', ({ taskId, chunkIndex }) => {
+      // 分片上传成功，无需特殊处理
+    })
+
+    socket.value.on('upload_chunk_fail', ({ taskId, chunkIndex, error }) => {
+      const task = uploadTasks.value.get(taskId)
+      if (task) {
+        task.status = 'failed'
+        task.error = `分片 ${ chunkIndex } 上传失败: ${ error }`
+        $message.error(task.error)
+      }
+    })
+
     // SSH连接错误处理
     socket.value.on('shell_connection_error', ({ message, code }) => {
       console.error('SFTP连接shell终端错误：', message, 'Code:', code)
@@ -801,7 +1084,13 @@ const copyCurrentPath = () => {
 }
 
 const handleUpload = (type) => {
-  $message.info(`todo: 上传${ type === 'file' ? '文件' : '文件夹' } (占位)`)
+  if (type === 'file') {
+    // 触发文件选择器
+    uploadInputRef.value?.click()
+  } else if (type === 'folder') {
+    // 触发文件夹选择器
+    uploadDirInputRef.value?.click()
+  }
 }
 
 const handleNew = (type) => {
@@ -1197,6 +1486,11 @@ const showDownloadManager = () => {
   showDownloadDialog.value = true
 }
 
+// 显示上传任务管理器
+const showUploadManager = () => {
+  showUploadDialog.value = true
+}
+
 // 手动下载文件
 const downloadFile = (task) => {
   if (task.downloadUrl) {
@@ -1320,6 +1614,238 @@ const onTextFileSaved = ({ filePath }) => {
   // 可以在这里添加其他保存成功后的处理逻辑
   console.log('文本文件保存成功:', filePath)
 }
+
+// 上传相关功能
+const handleFileSelect = (event) => {
+  const files = Array.from(event.target.files)
+  if (files.length === 0) return
+
+  console.log('选择的文件:', files)
+
+  // 检查是否有正在进行的任务
+  if (activeUploadTasks.value.length > 0) {
+    $message.warning('请等待当前上传任务完成后再添加新任务')
+    event.target.value = ''
+    return
+  }
+
+  // 开始上传所有选中的文件
+  files.forEach(file => {
+    startFileUpload(file)
+  })
+
+  // 重置input value，允许选择相同文件
+  event.target.value = ''
+}
+
+const handleDirSelect = (event) => {
+  const files = Array.from(event.target.files)
+  if (files.length === 0) return
+
+  console.log('选择的文件夹:', files)
+
+  // 检查是否有正在进行的任务
+  if (activeUploadTasks.value.length > 0) {
+    $message.warning('请等待当前上传任务完成后再添加新任务')
+    event.target.value = ''
+    return
+  }
+
+  // 开始上传文件夹中的所有文件
+  files.forEach(file => {
+    startFileUpload(file, file.webkitRelativePath)
+  })
+
+  // 重置input value，允许选择相同文件夹
+  event.target.value = ''
+}
+
+// 开始文件上传
+const startFileUpload = (file, relativePath = null) => {
+  // 生成任务ID
+  const taskId = Date.now() + '-' + Math.random().toString(36).slice(2)
+
+  // 确定目标路径
+  let targetPath
+  if (relativePath) {
+    // 文件夹上传：保持相对路径结构
+    targetPath = currentPath.value === '/'
+      ? `/${ relativePath }`
+      : `${ currentPath.value }/${ relativePath }`
+  } else {
+    // 单文件上传：直接放到当前目录
+    targetPath = currentPath.value === '/'
+      ? `/${ file.name }`
+      : `${ currentPath.value }/${ file.name }`
+  }
+
+  // 创建上传任务
+  const uploadTask = {
+    taskId,
+    fileName: file.name,
+    originalFile: file,
+    targetPath,
+
+    // 总体进度
+    progress: 0,
+
+    // 分片上传进度
+    chunkProgress: 0,
+    chunkUploadedSize: 0,
+    chunkTotalSize: file.size,
+
+    // SFTP传输进度
+    sftpProgress: 0,
+    sftpUploadedSize: 0,
+    sftpTotalSize: file.size,
+
+    // 其他属性
+    totalSize: file.size,
+    speed: 0,
+    eta: 0,
+    status: 'pending',
+    stage: 'uploading',
+    startTime: Date.now(),
+    error: null
+  }
+
+  uploadTasks.value.set(taskId, uploadTask)
+
+  // 开始上传
+  performFileUpload(uploadTask)
+}
+
+// 执行文件上传
+const performFileUpload = async (task) => {
+  try {
+    if (!socket.value) {
+      throw new Error('WebSocket连接未建立')
+    }
+
+    // 检查文件大小限制 (1GB)
+    const maxFileSize = 1024 * 1024 * 1024 // 1GB
+    if (task.totalSize > maxFileSize) {
+      throw new Error(`文件过大（${ formatSize(task.totalSize) }），单个文件不能超过1GB`)
+    }
+
+    // 发送上传开始事件
+    socket.value.emit('upload_start', {
+      taskId: task.taskId,
+      fileName: task.fileName,
+      fileSize: task.totalSize,
+      targetPath: task.targetPath
+    })
+
+    // 读取文件并分片上传
+    const reader = new FileReader()
+    reader.onload = async (e) => {
+      const arrayBuffer = e.target.result
+      const chunkSize = 512 * 1024 // 512KB per chunk
+      const totalChunks = Math.ceil(arrayBuffer.byteLength / chunkSize)
+
+      console.log(`开始分片上传: ${ task.fileName }, 总分片数: ${ totalChunks }`)
+
+      // 分片上传
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * chunkSize
+        const end = Math.min(start + chunkSize, arrayBuffer.byteLength)
+        const chunk = arrayBuffer.slice(start, end)
+
+        // 发送分片
+        socket.value.emit('upload_chunk', {
+          taskId: task.taskId,
+          chunkIndex: i,
+          chunkData: chunk,
+          totalChunks,
+          isLastChunk: i === totalChunks - 1
+        })
+
+        // 等待分片上传确认
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('分片上传超时'))
+          }, 30000) // 30秒超时
+
+          const handleSuccess = ({ taskId: responseTaskId, chunkIndex }) => {
+            if (responseTaskId === task.taskId && chunkIndex === i) {
+              clearTimeout(timeout)
+              socket.value.off('upload_chunk_success', handleSuccess)
+              socket.value.off('upload_chunk_fail', handleFail)
+              resolve()
+            }
+          }
+
+          const handleFail = ({ taskId: responseTaskId, chunkIndex, error }) => {
+            if (responseTaskId === task.taskId && chunkIndex === i) {
+              clearTimeout(timeout)
+              socket.value.off('upload_chunk_success', handleSuccess)
+              socket.value.off('upload_chunk_fail', handleFail)
+              reject(new Error(error))
+            }
+          }
+
+          socket.value.on('upload_chunk_success', handleSuccess)
+          socket.value.on('upload_chunk_fail', handleFail)
+        })
+      }
+
+      console.log(`分片上传完成: ${ task.fileName }`)
+    }
+
+    reader.onerror = () => {
+      throw new Error('文件读取失败')
+    }
+
+    reader.readAsArrayBuffer(task.originalFile)
+
+  } catch (error) {
+    console.error('上传文件失败:', error)
+    // 直接使用传入的task参数，无需重新获取
+    task.status = 'failed'
+    task.error = error.message
+    $message.error(`上传失败: ${ error.message }`)
+  }
+}
+
+// 上传任务管理函数
+const cancelUpload = (taskId) => {
+  const task = uploadTasks.value.get(taskId)
+  if (task && task.status === 'uploading') {
+    // 通知服务器取消上传
+    socket.value?.emit('upload_cancel', { taskId })
+
+    // 删除本地任务
+    uploadTasks.value.delete(taskId)
+  }
+}
+
+const retryUpload = (task) => {
+  if (task.originalFile) {
+    // 删除失败的任务
+    uploadTasks.value.delete(task.taskId)
+
+    // 重新开始上传
+    startFileUpload(task.originalFile, task.targetPath.includes('/') ? task.targetPath.split('/').slice(0, -1).join('/') : null)
+    $message.info('重新开始上传...')
+  }
+}
+
+const removeUploadTask = (taskId) => {
+  uploadTasks.value.delete(taskId)
+}
+
+const clearCompletedTasks = () => {
+  const completedTasks = Array.from(uploadTasks.value.entries())
+    .filter(([_, task,]) => task.status === 'completed')
+
+  completedTasks.forEach(([taskId,]) => {
+    uploadTasks.value.delete(taskId)
+  })
+
+  if (completedTasks.length > 0) {
+    $message.success(`已清空 ${ completedTasks.length } 个完成任务`)
+  }
+}
 </script>
 
 <style lang="scss" scoped>
@@ -1397,6 +1923,11 @@ const onTextFileSaved = ({ filePath }) => {
         color: var(--el-color-success);
         animation: pulse 1.5s ease-in-out infinite;
       }
+
+      &.upload_icon {
+        color: var(--el-color-primary);
+        animation: pulse 1.5s ease-in-out infinite;
+      }
     }
 
     @keyframes pulse {
@@ -1451,6 +1982,18 @@ const onTextFileSaved = ({ filePath }) => {
       font-size: 14px;
       color: var(--el-color-warning);
       flex-shrink: 0; // 星标不缩小
+      opacity: 0; // 默认隐藏
+      transition: opacity 0.2s ease; // 平滑过渡
+
+      // 已收藏的文件始终显示星标
+      &.favorited {
+        opacity: 1;
+      }
+    }
+
+    // 鼠标悬停时显示星标
+    &:hover .star_icon {
+      opacity: 1;
     }
   }
 
@@ -1527,6 +2070,67 @@ const onTextFileSaved = ({ filePath }) => {
   overflow-y: auto;
 }
 
+/* 上传管理器样式 */
+.upload_manager_container {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.upload_section {
+  margin-bottom: 24px;
+}
+
+.upload_section:last-child {
+  margin-bottom: 0;
+}
+
+.upload_task_list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.upload_task_item {
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 8px;
+  background-color: var(--el-bg-color-page);
+}
+
+.upload_task_item.completed {
+  border-color: var(--el-color-success-light-7);
+  background-color: var(--el-color-success-light-9);
+}
+
+.upload_task_item.failed {
+  border-color: var(--el-color-danger-light-7);
+  background-color: var(--el-color-danger-light-9);
+}
+
+.upload_task_item .file_icon.error {
+  color: var(--el-color-danger);
+}
+
+.upload_task_item .error_info {
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 4px;
+  background-color: var(--el-color-danger-light-9);
+  border: 1px solid var(--el-color-danger-light-7);
+}
+
+.upload_task_item .error_text {
+  color: var(--el-color-danger);
+  font-size: 12px;
+}
+
+.upload_dialog_footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
 .download_section {
   margin-bottom: 24px;
 }
@@ -1565,18 +2169,21 @@ const onTextFileSaved = ({ filePath }) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  min-width: 0; /* 允许flex子元素缩小 */
 }
 
 .file_info {
   display: flex;
   align-items: center;
   flex: 1;
+  min-width: 0; /* 允许flex子元素缩小 */
 }
 
 .file_icon {
   margin-right: 8px;
   color: var(--el-color-primary);
   font-size: 16px;
+  flex-shrink: 0; /* 图标不缩小 */
 }
 
 .file_icon.success {
@@ -1586,6 +2193,12 @@ const onTextFileSaved = ({ filePath }) => {
 .file_name {
   font-weight: 500;
   color: var(--el-text-color-primary);
+  flex: 1;
+  min-width: 0; /* 允许文本缩小 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-right: 8px; /* 为按钮留出空间 */
 }
 
 .completed_text {
@@ -1598,10 +2211,28 @@ const onTextFileSaved = ({ filePath }) => {
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-shrink: 0; /* 按钮区域不缩小 */
 }
 
 .progress_info {
   margin-top: 8px;
+}
+
+.progress_section {
+  margin-bottom: 8px;
+}
+
+.progress_section:last-of-type {
+  margin-bottom: 0;
+}
+
+.progress_label {
+  font-size: 11px;
+  color: var(--el-text-color-regular);
+  margin-bottom: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .progress_details {
