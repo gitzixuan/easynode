@@ -215,6 +215,52 @@ const listenAction = (sftpClient, socket, isRootUser) => {
     }
   })
 
+  // -------- create file/folder --------
+  socket.on('create_item', async ({ dirPath, name, type }) => {
+    try {
+      if (!name || !name.trim()) {
+        throw new Error('文件名不能为空')
+      }
+
+      const trimmedName = name.trim()
+
+      // 验证文件名（不能包含路径分隔符和其他无效字符）
+      const invalidChars = ['/', '\0']
+      if (invalidChars.some(char => trimmedName.includes(char))) {
+        throw new Error('文件名包含无效字符')
+      }
+
+      const targetPath = rawPath.posix.join(dirPath, trimmedName)
+
+      // 检查文件/文件夹是否已存在
+      const exists = await sftpClient.exists(targetPath)
+      if (exists) {
+        throw new Error(`${ type === 'folder' ? '文件夹' : '文件' } "${ trimmedName }" 已存在`)
+      }
+
+      if (type === 'folder') {
+        consola.info(`创建文件夹: ${ targetPath }`)
+        await sftpClient.mkdir(targetPath)
+        socket.emit('create_success', `文件夹 "${ trimmedName }" 创建成功`)
+      } else if (type === 'file') {
+        consola.info(`创建文件: ${ targetPath }`)
+        // 创建空文件，使用 touch 命令
+        const cmd = `touch "${ targetPath }"`
+        await execCommand(cmd)
+        socket.emit('create_success', `文件 "${ trimmedName }" 创建成功`)
+      } else {
+        throw new Error('无效的创建类型')
+      }
+
+      // 返回最新目录列表
+      const dirLs = await sftpClient.list(dirPath)
+      socket.emit('dir_ls', dirLs, dirPath)
+    } catch (err) {
+      consola.error('create error:', err.message)
+      socket.emit('create_fail', err.message)
+    }
+  })
+
   // 下载功能
   socket.on('download_request', async ({ dirPath, targets }) => {
     let remoteTarPath = null // 跟踪远程临时文件路径

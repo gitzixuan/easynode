@@ -22,8 +22,8 @@
         </el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item @click="handleNew('folder')">新建文件夹</el-dropdown-item>
             <el-dropdown-item @click="handleNew('file')">新建文件</el-dropdown-item>
+            <el-dropdown-item @click="handleNew('folder')">新建文件夹</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -97,7 +97,12 @@
       @selection-change="onSelectionChange"
     >
       <el-table-column type="selection" width="32" />
-      <el-table-column label="名称" width="auto">
+      <el-table-column
+        label="名称"
+        width="auto"
+        max-width="200"
+        show-overflow-tooltip
+      >
         <template #default="{ row }">
           <div class="file_name_cell">
             <img :src="getIcon(row.type)" class="file_icon">
@@ -144,9 +149,10 @@
     >
       <template #default>
         <el-input
+          ref="createInputRef"
           v-model="createName"
-          :placeholder="createType === 'folder' ? '输入文件夹名称' : '输入文件名称'"
           size="small"
+          :placeholder="createType === 'folder' ? '输入文件夹名称' : '输入文件名称'"
           @keyup.enter="confirmCreate"
         />
         <div class="sftp_popover_actions">
@@ -321,6 +327,7 @@ const createType = ref('folder') // 'folder' | 'file'
 const createName = ref('')
 const createPopoverRef = ref(null) // 固定参照元素 (新建按钮)
 const newBtnRef = ref(null)
+const createInputRef = ref(null)
 
 // 上下文菜单
 const { showMenu } = useContextMenu()
@@ -430,6 +437,17 @@ const connectSftp = () => {
 
     socket.value.on('copy_fail', (msg) => {
       $message.error(`复制失败: ${ msg }`)
+      loading.value = false
+    })
+
+    socket.value.on('create_success', (msg) => {
+      $message.success(msg || '创建成功')
+      loading.value = false
+      refresh()
+    })
+
+    socket.value.on('create_fail', (msg) => {
+      $message.error(`创建失败: ${ msg }`)
       loading.value = false
     })
 
@@ -595,14 +613,28 @@ const handleNew = (type) => {
   createType.value = type
   createName.value = ''
   showCreatePopover.value = true
+
+  // 等待 Popover 完全显示后再聚焦
+  setTimeout(() => {
+    if (createInputRef.value) {
+      // Element Plus el-input 组件的聚焦方法
+      createInputRef.value.focus()
+    }
+  }, 100)
 }
 
 const confirmCreate = () => {
   if (!createName.value.trim()) return
-  const text = createType.value === 'folder' ? '文件夹' : '文件'
-  $message.success(`新建${ text }：${ createName.value } (占位)`)
+  if (!socket.value) return
+
+  loading.value = true
   showCreatePopover.value = false
-  refresh()
+
+  socket.value.emit('create_item', {
+    dirPath: currentPath.value,
+    name: createName.value.trim(),
+    type: createType.value // 'folder' or 'file'
+  })
 }
 
 const handleCompress = () => {
