@@ -6,10 +6,11 @@ const { Server } = require('socket.io')
 const { sftpCacheDir } = require('../config')
 const { verifyAuthSync } = require('../utils/verify-auth')
 const { isAllowedIp } = require('../utils/tools')
-const { HostListDB } = require('../utils/db-class')
+const { HostListDB, FavoriteSftpDB } = require('../utils/db-class')
 const { getConnectionOptions } = require('./terminal')
 const decryptAndExecuteAsync = require('../utils/decrypt-file')
 const hostListDB = new HostListDB().getInstance()
+const favoriteSftpDB = new FavoriteSftpDB().getInstance()
 const { Client: SSHClient } = require('ssh2')
 
 const listenAction = (sftpClient, socket, isRootUser) => {
@@ -735,10 +736,10 @@ module.exports = (httpServer) => {
 
       // 添加错误处理器，防止程序崩溃
       sftpClient.client.on('error', (err) => {
-        consola.error('SSH客户端错误:', err.message)
+        consola.error('SFTP连接shell终端错误：:', err.message)
         // 发送SSH连接错误事件，而不是WebSocket连接失败事件
-        socket.emit('ssh_connection_error', {
-          message: `SSH连接错误: ${ err.message }`,
+        socket.emit('shell_connection_error', {
+          message: `SFTP连接shell终端错误：: ${ err.message }`,
           code: err.code || 'UNKNOWN'
         })
       })
