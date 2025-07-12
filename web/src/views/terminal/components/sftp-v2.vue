@@ -27,15 +27,6 @@
           </el-dropdown-menu>
         </template>
       </el-dropdown>
-
-      <!-- 压缩 -->
-      <el-button
-        size="small"
-        :disabled="!hasSelection"
-        @click="handleCompress"
-      >
-        压缩
-      </el-button>
     </div>
 
     <!-- 路径栏：当前路径 + 操作按钮 -->
@@ -318,7 +309,6 @@ const fileList = computed(() => {
   })
 })
 const selectedRows = ref([])
-const hasSelection = computed(() => selectedRows.value.length > 0)
 const tableRef = ref(null)
 
 // 上传 & 新建 (Popover)
@@ -448,6 +438,28 @@ const connectSftp = () => {
 
     socket.value.on('create_fail', (msg) => {
       $message.error(`创建失败: ${ msg }`)
+      loading.value = false
+    })
+
+    socket.value.on('compress_success', (msg) => {
+      $message.success(msg || '压缩成功')
+      loading.value = false
+      refresh()
+    })
+
+    socket.value.on('compress_fail', (msg) => {
+      $message.error(`压缩失败: ${ msg }`)
+      loading.value = false
+    })
+
+    socket.value.on('decompress_success', (msg) => {
+      $message.success(msg || '解压成功')
+      loading.value = false
+      refresh()
+    })
+
+    socket.value.on('decompress_fail', (msg) => {
+      $message.error(`解压失败: ${ msg }`)
       loading.value = false
     })
 
@@ -637,10 +649,6 @@ const confirmCreate = () => {
   })
 }
 
-const handleCompress = () => {
-  $message.info('压缩功能待实现 (占位)')
-}
-
 //----------------------------------
 // 列表事件
 //----------------------------------
@@ -661,7 +669,7 @@ const onSelectionChange = (rows) => {
 }
 
 const isArchiveFile = (filename) => {
-  return /(\.zip|\.tar\.gz|\.tgz|\.rar)$/i.test(filename)
+  return /(\.zip|\.tar\.gz|\.tgz|\.tar|\.rar)$/i.test(filename)
 }
 
 // ============== Rename ==============
@@ -729,10 +737,23 @@ const onRowContextMenu = (row, _column, event) => {
       onClick: () => handleMove(row)
     },
     {
-      label: '删除',
-      onClick: () => handleDelete(row)
+      label: '压缩',
+      onClick: () => handleCompress(row)
     }
   )
+
+  // 解压功能只在单选且为压缩文件时显示
+  if (!isMultiSelected && row.type === '-' && isArchiveFile(row.name)) {
+    items.push({
+      label: '解压',
+      onClick: () => handleDecompress(row)
+    })
+  }
+
+  items.push({
+    label: '删除',
+    onClick: () => handleDelete(row)
+  })
 
   // 重命名只在单选时显示
   if (!isMultiSelected) {
@@ -749,14 +770,6 @@ const onRowContextMenu = (row, _column, event) => {
       $message.success('已复制路径')
     }
   })
-
-  // 解压功能只在单选且为压缩文件时显示
-  if (!isMultiSelected && row.type === '-' && isArchiveFile(row.name)) {
-    items.push({
-      label: '解压',
-      onClick: () => $message.info('解压 (占位)')
-    })
-  }
 
   showMenu(event, items)
 }
@@ -838,6 +851,70 @@ const handleCopy = (row) => {
     if (!destDir) return
     loading.value = true
     socket.value.emit('copy_server_batch', { dirPath: currentPath.value, destDir, targets: targets.map(t=>({ name:t.name })) })
+  })
+}
+
+const handleCompress = (row) => {
+  const targets = selectedRows.value.length > 1 && selectedRows.value.includes(row) ? selectedRows.value : [row,]
+  const defaultName = targets.length === 1 ?
+    `${ targets[0].name }.tar.gz` :
+    `archive-${ Date.now() }.tar.gz`
+
+  $messageBox.prompt('', '压缩文件', {
+    inputType: 'text',
+    inputValue: defaultName,
+    inputPlaceholder: '压缩文件名（建议以.tar.gz结尾）',
+    confirmButtonText: '确定',
+    cancelButtonText: '取消',
+    inputValidator: (v) => !!v?.trim() || '请输入压缩文件名'
+  }).then(({ value }) => {
+    const archiveName = value.trim()
+    if (!archiveName) return
+
+    loading.value = true
+    socket.value.emit('compress_files', {
+      dirPath: currentPath.value,
+      targets: targets.map(t => ({ name: t.name, type: t.type })),
+      archiveName
+    })
+  })
+}
+
+const handleDecompress = (row) => {
+  // 解压功能只对单个压缩文件有效
+  if (row.type !== '-' || !isArchiveFile(row.name)) {
+    $message.error('只能解压压缩文件')
+    return
+  }
+
+  // 获取文件名（去掉扩展名）用于创建同名文件夹
+  const baseName = row.name.replace(/\.(tar\.gz|tgz|tar|zip)$/i, '')
+
+  $messageBox.confirm('', '选择解压方式', {
+    confirmButtonText: '解压到当前文件夹',
+    cancelButtonText: '解压到同名文件夹',
+    message: `文件: ${ row.name }\n\n`,
+    type: 'question',
+    showCancelButton: true,
+    cancelButtonClass: 'el-button--primary',
+    confirmButtonClass: 'el-button--success'
+  }).then(() => {
+    // 解压到当前文件夹
+    loading.value = true
+    socket.value.emit('decompress_file', {
+      dirPath: currentPath.value,
+      fileName: row.name,
+      mode: 'current'
+    })
+  }).catch(() => {
+    // 解压到同名文件夹
+    loading.value = true
+    socket.value.emit('decompress_file', {
+      dirPath: currentPath.value,
+      fileName: row.name,
+      mode: 'folder',
+      folderName: baseName
+    })
   })
 }
 

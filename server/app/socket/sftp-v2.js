@@ -261,6 +261,136 @@ const listenAction = (sftpClient, socket, isRootUser) => {
     }
   })
 
+  // -------- compress files --------
+  socket.on('compress_files', async ({ dirPath, targets, archiveName }) => {
+    try {
+      if (!targets || targets.length === 0) {
+        throw new Error('未选择要压缩的文件')
+      }
+
+      if (!archiveName || !archiveName.trim()) {
+        throw new Error('压缩文件名不能为空')
+      }
+
+      const trimmedArchiveName = archiveName.trim()
+
+      // 验证压缩文件名
+      const invalidChars = ['/', '\0']
+      if (invalidChars.some(char => trimmedArchiveName.includes(char))) {
+        throw new Error('压缩文件名包含无效字符')
+      }
+
+      const archivePath = rawPath.posix.join(dirPath, trimmedArchiveName)
+
+      // 检查压缩文件是否已存在
+      const exists = await sftpClient.exists(archivePath)
+      if (exists) {
+        throw new Error(`文件 "${ trimmedArchiveName }" 已存在`)
+      }
+
+      // 构建要压缩的文件列表
+      const fileNames = targets.map(t => `"${ t.name }"`).join(' ')
+
+      // 使用 tar 命令压缩
+      const tarCmd = `cd "${ dirPath }" && tar -czf "${ trimmedArchiveName }" ${ fileNames }`
+
+      consola.info(`开始压缩文件: ${ targets.map(t => t.name).join(', ') } -> ${ trimmedArchiveName }`)
+      await execCommand(tarCmd)
+      consola.info(`压缩完成: ${ trimmedArchiveName }`)
+
+      socket.emit('compress_success', `压缩文件 "${ trimmedArchiveName }" 创建成功`)
+
+      // 返回最新目录列表
+      const dirLs = await sftpClient.list(dirPath)
+      socket.emit('dir_ls', dirLs, dirPath)
+    } catch (err) {
+      consola.error('compress error:', err.message)
+      socket.emit('compress_fail', err.message)
+    }
+  })
+
+  // -------- decompress file --------
+  socket.on('decompress_file', async ({ dirPath, fileName, mode, folderName }) => {
+    try {
+      if (!fileName || !fileName.trim()) {
+        throw new Error('文件名不能为空')
+      }
+
+      const trimmedFileName = fileName.trim()
+      const archivePath = rawPath.posix.join(dirPath, trimmedFileName)
+
+      // 检查压缩文件是否存在
+      const exists = await sftpClient.exists(archivePath)
+      if (!exists) {
+        throw new Error(`文件 "${ trimmedFileName }" 不存在`)
+      }
+
+      // 检查是否为支持的压缩格式
+      const isValidArchive = /(\.tar\.gz|\.tgz|\.tar|\.zip)$/i.test(trimmedFileName)
+      if (!isValidArchive) {
+        throw new Error('不支持的压缩格式，仅支持 .tar.gz、.tgz、.tar、.zip 格式')
+      }
+
+      // 确定解压目标目录
+      let targetDir = dirPath
+      let targetDirName = '当前文件夹'
+
+      if (mode === 'folder' && folderName) {
+        // 解压到同名文件夹
+        targetDir = rawPath.posix.join(dirPath, folderName)
+        targetDirName = `文件夹 "${ folderName }"`
+
+        // 检查目标文件夹是否已存在
+        const targetExists = await sftpClient.exists(targetDir)
+        if (targetExists) {
+          throw new Error(`目标文件夹 "${ folderName }" 已存在`)
+        }
+
+        // 创建目标文件夹
+        await sftpClient.mkdir(targetDir)
+        consola.info(`创建目标文件夹: ${ targetDir }`)
+      }
+
+      // 根据文件扩展名选择解压命令
+      let decompressCmd = ''
+      if (/\.tar\.gz$|\.tgz$/i.test(trimmedFileName)) {
+        // tar.gz 或 tgz 格式
+        if (mode === 'folder') {
+          decompressCmd = `cd "${ dirPath }" && tar -xzf "${ trimmedFileName }" -C "${ folderName }"`
+        } else {
+          decompressCmd = `cd "${ dirPath }" && tar -xzf "${ trimmedFileName }"`
+        }
+      } else if (/\.tar$/i.test(trimmedFileName)) {
+        // tar 格式
+        if (mode === 'folder') {
+          decompressCmd = `cd "${ dirPath }" && tar -xf "${ trimmedFileName }" -C "${ folderName }"`
+        } else {
+          decompressCmd = `cd "${ dirPath }" && tar -xf "${ trimmedFileName }"`
+        }
+      } else if (/\.zip$/i.test(trimmedFileName)) {
+        // zip 格式
+        if (mode === 'folder') {
+          decompressCmd = `cd "${ dirPath }" && unzip -o "${ trimmedFileName }" -d "${ folderName }"`
+        } else {
+          decompressCmd = `cd "${ dirPath }" && unzip -o "${ trimmedFileName }"`
+        }
+      }
+
+      consola.info(`开始解压文件: ${ trimmedFileName } -> ${ targetDirName }`)
+      await execCommand(decompressCmd)
+      consola.info(`解压完成: ${ trimmedFileName } -> ${ targetDirName }`)
+
+      socket.emit('decompress_success', `文件 "${ trimmedFileName }" 解压到${ targetDirName }成功`)
+
+      // 返回最新目录列表
+      const dirLs = await sftpClient.list(dirPath)
+      socket.emit('dir_ls', dirLs, dirPath)
+    } catch (err) {
+      consola.error('decompress error:', err.message)
+      socket.emit('decompress_fail', err.message)
+    }
+  })
+
   // 下载功能
   socket.on('download_request', async ({ dirPath, targets }) => {
     let remoteTarPath = null // 跟踪远程临时文件路径
