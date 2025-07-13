@@ -6,7 +6,6 @@
           ref="hostDropdownRef"
           trigger="click"
           max-height="50vh"
-          :teleported="false"
           class="dropdown_menu"
         >
           <span class="link_text">连接<el-icon class="link_icon"><arrow-down /></el-icon></span>
@@ -43,7 +42,6 @@
           ref="scriptDropdownRef"
           trigger="click"
           max-height="50vh"
-          :teleported="false"
           class="dropdown_menu"
         >
           <span class="link_text">脚本库<el-icon class="link_icon"><arrow-down /></el-icon></span>

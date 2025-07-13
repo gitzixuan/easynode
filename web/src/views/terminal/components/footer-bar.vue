@@ -8,6 +8,8 @@
         <el-tab-pane label="容器管理" name="docker">
           <Docker v-if="show" :host-id="hostId" />
         </el-tab-pane>
+        <!-- <el-tab-pane label="进程管理" name="process">
+        </el-tab-pane> -->
       </el-tabs>
     </div>
   </div>
