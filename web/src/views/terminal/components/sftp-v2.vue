@@ -992,7 +992,7 @@ const connectSftp = () => {
       }
     })
 
-    socket.value.on('upload_complete', ({ taskId, fileName, targetPath }) => {
+    socket.value.on('upload_complete', ({ taskId, fileName }) => {
       const task = uploadTasks.value.get(taskId)
       if (task) {
         task.status = 'completed'
@@ -1016,9 +1016,9 @@ const connectSftp = () => {
       uploadTasks.value.delete(taskId)
     })
 
-    socket.value.on('upload_chunk_success', ({ taskId, chunkIndex }) => {
-      // 分片上传成功，无需特殊处理
-    })
+    // socket.value.on('upload_chunk_success', ({ taskId, chunkIndex }) => {
+    //   // 分片上传成功，无需特殊处理
+    // })
 
     socket.value.on('upload_chunk_fail', ({ taskId, chunkIndex, error }) => {
       const task = uploadTasks.value.get(taskId)
@@ -2267,7 +2267,8 @@ const clearCompletedTasks = () => {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      padding-right: 24px; // 为星标留出空间
+      padding-right: 18px; // 为星标留出空间
+      user-select: none;
     }
     .rename_input {
       width: 120px;
@@ -2282,7 +2283,7 @@ const clearCompletedTasks = () => {
     }
     .star_icon {
       position: absolute;
-      right: 8px;
+      right: -4px;
       cursor: pointer;
       font-size: 14px;
       color: var(--el-color-warning);
