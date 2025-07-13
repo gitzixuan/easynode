@@ -131,6 +131,27 @@
             />
           </el-tooltip>
         </div>
+        <div class="switch_wrap">
+          <!-- :content="isSingleWindowMode ? '多窗口展示连接的多个服务器终端' : '单窗口一屏展示连接的不同服务器终端'" -->
+          <el-tooltip
+            effect="dark"
+            placement="bottom"
+            content="开发中"
+          >
+            <el-switch
+              v-model="isSingleWindowMode"
+              disabled
+              class="swtich"
+              inline-prompt
+              style="
+                --el-switch-on-color: #13ce66;
+                --el-switch-off-color: #409eff;
+              "
+              active-text="单窗口模式"
+              inactive-text="多窗口模式"
+            />
+          </el-tooltip>
+        </div>
       </div>
     </div>
     <!-- <el-drawer
@@ -195,7 +216,7 @@
             <div :class="['tab_content_wrap_header_item', { 'active': showSftp }]">
               <el-tooltip
                 effect="dark"
-                content="Sftp"
+                content="文件传输"
                 placement="bottom"
               >
                 <span @click="() => (showSftp = !showSftp)">
@@ -289,6 +310,7 @@
           >
             <FooterBar
               :host-id="item.id"
+              :show="showFooterBar"
               @resize="resizeTerminal"
               @exec-command="handleInputCommand"
             />
@@ -358,6 +380,7 @@ const terminalRefs = ref([])
 const activeTabIndex = ref(0)
 const visible = ref(true)
 const isSyncAllSession = ref(false)
+const isSingleWindowMode = ref(false)
 const mainHeight = ref('')
 const hostFormVisible = ref(false)
 const updateHostData = ref(null)
@@ -862,7 +885,7 @@ const handleInputCommand = async (command) => {
       .switch_wrap {
         display: flex;
         align-items: center;
-        margin-right: 5px;
+        margin-right: 16px;
       }
 
       .full_icon {

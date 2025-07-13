@@ -1622,14 +1622,14 @@ const handleDelete = (row) => {
   const fileCount = targets.length
 
   const message = fileCount === 1
-    ? `确认删除以下文件(夹)：\n\n${ namesStr }`
-    : `确认删除以下 ${ fileCount } 个文件(夹)：\n\n${ namesStr }`
+    ? `确认删除以下文件(夹)：\n${ namesStr }`
+    : `确认删除以下 ${ fileCount } 个文件(夹)：\n${ namesStr }`
 
   $messageBox.confirm(message, '删除确认', {
     confirmButtonText: '确定删除',
     cancelButtonText: '取消',
     type: 'warning',
-    customClass: 'delete-confirm-dialog'
+    customClass: 'delete_confirm_dialog'
   }).then(() => {
     loading.value = true
     socket.value.emit('delete_batch', { dirPath: currentPath.value, targets: targets.map(t=>({ name:t.name, type:t.type })) })
@@ -2607,7 +2607,7 @@ const clearCompletedTasks = () => {
 }
 
 /* 删除确认对话框样式 */
-.delete-confirm-dialog {
+.delete_confirm_dialog {
   .el-message-box__content {
     max-height: 300px;
     overflow-y: auto;

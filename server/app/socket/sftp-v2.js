@@ -1,7 +1,6 @@
 const rawPath = require('path')
 const fs = require('fs-extra')
 const SFTPClient = require('ssh2-sftp-client')
-const CryptoJS = require('crypto-js')
 const { Server } = require('socket.io')
 const { sftpCacheDir } = require('../config')
 const { verifyAuthSync } = require('../utils/verify-auth')
@@ -13,7 +12,7 @@ const hostListDB = new HostListDB().getInstance()
 const favoriteSftpDB = new FavoriteSftpDB().getInstance()
 const { Client: SSHClient } = require('ssh2')
 
-const listenAction = (sftpClient, socket, isRootUser) => {
+const listenAction = (sftpClient, socket) => {
   // 下载任务管理
   const downloadTasks = new Map() // taskId -> { abortController, startTime, totalSize, downloadedSize }
 
@@ -208,10 +207,10 @@ const listenAction = (sftpClient, socket, isRootUser) => {
         })
 
         // 处理连接断开
-        stream.on('close', (code, signal) => {
+        stream.on('close', (code) => {
           if (errMsg) {
             consola.error('命令执行错误:', cmd, errMsg)
-            resolveOnce(new Error(`命令执行失败: ${ errMsg }`), true)
+            resolveOnce(new Error(`命令执行失败: ${ code }: ${ errMsg }`), true)
           } else {
             consola.info('命令执行完成:', cmd)
             resolveOnce('success')
@@ -1262,8 +1261,8 @@ const listenAction = (sftpClient, socket, isRootUser) => {
           return
         }
 
-        const { totalSize, downloadedSize, startTime } = currentTask
-        const elapsed = (now - startTime) / 1000 // 秒
+        const { totalSize, downloadedSize } = currentTask // , startTime
+        // const elapsed = (now - startTime) / 1000 // 秒
         const progress = totalSize > 0 ? (downloadedSize / totalSize * 100) : 0
 
         // 计算速度 (bytes/s)
@@ -1462,7 +1461,7 @@ module.exports = (httpServer) => {
             currentPath: currentWorkingDir
           })
           consola.success('连接sftp-v2 成功：', host)
-          listenAction(sftpClient, socket, isRootUser)
+          listenAction(sftpClient, socket)
         } catch (error) {
           consola.error('连接sftp-v2 失败：', error.message)
 
