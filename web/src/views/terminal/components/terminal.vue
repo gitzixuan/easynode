@@ -191,6 +191,17 @@
                 </span>
               </el-tooltip>
             </div>
+            <!-- <div :class="['tab_content_wrap_header_item', { 'active': showSftp }]">
+              <el-tooltip
+                effect="dark"
+                content="同步终端目录到SFTP"
+                placement="bottom"
+              >
+                <span @click="() => (showSftp = !showSftp)">
+                  <svg-icon name="icon-CD" class="icon" />
+                </span>
+              </el-tooltip>
+            </div> -->
             <div :class="['tab_content_wrap_header_item', { 'active': getSyncCurTab(item.key) }]">
               <el-tooltip
                 effect="dark"
