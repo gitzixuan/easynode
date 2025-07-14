@@ -309,12 +309,15 @@
           </div>
           <div
             :class="['tab_content_footer', { 'show_footer_bar': showFooterBar }]"
+            :style="showFooterBar ? { height: footerBarHeight + 'px', minHeight: footerBarHeight + 'px' } : {}"
           >
             <FooterBar
               :host-id="item.id"
               :show="showFooterBar"
+              :height="footerBarHeight"
               @resize="resizeTerminal"
               @exec-command="handleInputCommand"
+              @height-change="handleFooterBarHeightChange"
             />
           </div>
         </div>
@@ -386,6 +389,7 @@ const showSetting = ref(false)
 const showInfoSide = ref(isMobileScreen.value ? false : localStorage.getItem('showInfoSide') !== 'false')
 const showSftpSide = ref(isMobileScreen.value ? false : localStorage.getItem('showSftpSide') !== 'false')
 const showFooterBar = ref(localStorage.getItem('showFooterBar') === 'true')
+const footerBarHeight = ref(parseInt(localStorage.getItem('footerBarHeight')) || 250)
 const longPressCtrl = ref(false)
 const longPressAlt = ref(false)
 const scriptDropdownRef = ref(null)
@@ -459,6 +463,42 @@ const changeSftp = () => {
 
 const changeShowFooterBar = () => {
   localStorage.setItem('showFooterBar', showFooterBar.value)
+}
+
+// Footer Bar 高度管理
+const saveFooterBarHeight = (height) => {
+  footerBarHeight.value = height
+  localStorage.setItem('footerBarHeight', height.toString())
+}
+
+// 防抖函数
+const debounce = (func, delay) => {
+  let timeoutId
+  return (...args) => {
+    clearTimeout(timeoutId)
+    timeoutId = setTimeout(() => func.apply(null, args), delay)
+  }
+}
+
+// 防抖版本的终端尺寸重计算
+const debouncedResizeTerminal = debounce(() => {
+  resizeTerminal()
+}, 100)
+
+// 防抖版本的localStorage保存
+const debouncedSaveToStorage = debounce((height) => {
+  localStorage.setItem('footerBarHeight', height.toString())
+}, 300)
+
+const handleFooterBarHeightChange = (height) => {
+  // 立即更新响应式状态（保证UI实时更新）
+  footerBarHeight.value = height
+
+  // 防抖保存到localStorage
+  debouncedSaveToStorage(height)
+
+  // 防抖触发终端尺寸重计算
+  debouncedResizeTerminal()
 }
 
 const getStartIndexByTabIndex = (idx) => {
@@ -1039,8 +1079,6 @@ const handleInputCommand = async (command) => {
         min-height: 0;
         overflow: hidden;
         &.show_footer_bar {
-          height: 250px;
-          min-height: 250px;
           overflow-x: hidden;
           overflow-y: auto;
         }
