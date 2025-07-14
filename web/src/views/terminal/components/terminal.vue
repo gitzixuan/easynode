@@ -117,6 +117,7 @@
               "
               active-text="功能栏"
               inactive-text="功能栏"
+              @change="changeShowFooterBar"
             />
           </el-tooltip>
         </div>
@@ -175,29 +176,29 @@
                 content="状态"
                 placement="bottom"
               >
-                <span @click="() => (showInfoSide = !showInfoSide)">
+                <span @click="changeInfoSide">
                   <svg-icon name="icon-zhuangtai" class="icon" />
                 </span>
               </el-tooltip>
             </div>
-            <div :class="['tab_content_wrap_header_item', { 'active': showSftp }]">
+            <div :class="['tab_content_wrap_header_item', { 'active': showSftpSide }]">
               <el-tooltip
                 effect="dark"
                 content="文件传输"
                 placement="bottom"
               >
-                <span @click="() => (showSftp = !showSftp)">
+                <span @click="changeSftp">
                   <svg-icon name="icon-sftp" class="icon" />
                 </span>
               </el-tooltip>
             </div>
-            <!-- <div :class="['tab_content_wrap_header_item', { 'active': showSftp }]">
+            <!-- <div :class="['tab_content_wrap_header_item', { 'active': showSftpSide }]">
               <el-tooltip
                 effect="dark"
                 content="同步终端目录到SFTP"
                 placement="bottom"
               >
-                <span @click="() => (showSftp = !showSftp)">
+                <span @click="() => (showSftpSide = !showSftpSide)">
                   <svg-icon name="icon-CD" class="icon" />
                 </span>
               </el-tooltip>
@@ -289,7 +290,7 @@
 
             <el-drawer
               v-if="isMobileScreen"
-              v-model="showSftp"
+              v-model="showSftpSide"
               :with-header="false"
               direction="rtl"
               class="mobile_menu_drawer"
@@ -299,7 +300,7 @@
                 @exec-command="handleInputCommand"
               />
             </el-drawer>
-            <div v-else :class="['tab_content_main_sftp', { 'show_sftp': showSftp }]">
+            <div v-else :class="['tab_content_main_sftp', { 'show_sftp': showSftpSide }]">
               <SftpV2
                 :host-id="item.id"
                 @exec-command="handleInputCommand"
@@ -382,9 +383,9 @@ const isSingleWindowMode = ref(false)
 const hostFormVisible = ref(false)
 const updateHostData = ref(null)
 const showSetting = ref(false)
-const showInfoSide = ref(!isMobileScreen.value)
-const showSftp = ref(!isMobileScreen.value)
-const showFooterBar = ref(false)
+const showInfoSide = ref(isMobileScreen.value ? false : localStorage.getItem('showInfoSide') !== 'false')
+const showSftpSide = ref(isMobileScreen.value ? false : localStorage.getItem('showSftpSide') !== 'false')
+const showFooterBar = ref(localStorage.getItem('showFooterBar') === 'true')
 const longPressCtrl = ref(false)
 const longPressAlt = ref(false)
 const scriptDropdownRef = ref(null)
@@ -444,6 +445,20 @@ const getTerminalCountByIndex = (idx) => {
   if (!key) return 0
   const { h, v } = getSplitStatus(key)
   return (h ? 2 : 1) * (v ? 2 : 1)
+}
+
+const changeInfoSide = () => {
+  showInfoSide.value = !showInfoSide.value
+  localStorage.setItem('showInfoSide', showInfoSide.value)
+}
+
+const changeSftp = () => {
+  showSftpSide.value = !showSftpSide.value
+  localStorage.setItem('showSftpSide', showSftpSide.value)
+}
+
+const changeShowFooterBar = () => {
+  localStorage.setItem('showFooterBar', showFooterBar.value)
 }
 
 const getStartIndexByTabIndex = (idx) => {
@@ -646,7 +661,7 @@ const terminalInput = (command, uid) => {
 // 识别命令动态切换目录功能暂时取消
 // const cdCommand = (path) => {
 //   // console.log('cdCommand:', path)
-//   if (!showSftp.value) return
+//   if (!showSftpSide.value) return
 //   if (isSyncAllSession.value) {
 //     sftpRefs.value.forEach(sftpRef => {
 //       sftpRef.openDir(path)
@@ -683,7 +698,7 @@ watch(
 )
 
 watch(
-  [showFooterBar, showInfoSide, showSftp,],
+  [showFooterBar, showInfoSide, showSftpSide,],
   () => {
     setTimeout(async () => {
       resizeTerminal()
